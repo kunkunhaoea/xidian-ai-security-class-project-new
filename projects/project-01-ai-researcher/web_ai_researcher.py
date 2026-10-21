@@ -14,12 +14,12 @@ import re  # For regular expression operations
 import random
 import global_state
 import base64
+from pathlib import Path
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
-# If you want to use proxy, please uncomment the following lines
-os.environ['https_proxy'] = 'http://100.68.161.73:3128'
-os.environ['http_proxy'] = 'http://100.68.161.73:3128'
+# Configure HTTP_PROXY / HTTPS_PROXY in the launching shell when needed.
+# Do not override the user's network settings with a hardcoded proxy.
 os.environ['no_proxy'] = 'localhost,127.0.0.1,0.0.0.0'
 
 def setup_path():
@@ -77,8 +77,15 @@ def return_paper_file():
     category = os.getenv("CATEGORY")
     instance_id = os.getenv("INSTANCE_ID")
     global PAPER_FILE
-    PAPER_FILE = f'{category}/target_sections/{instance_id}/iclr2025_conference.pdf'
-    return PAPER_FILE
+    project_root = Path(__file__).resolve().parent
+    relative_path = Path(str(category)) / 'target_sections' / str(instance_id) / 'iclr2025_conference.pdf'
+    for base in (project_root / 'paper_agent', project_root, project_root / 'research_agent'):
+        candidate = base / relative_path
+        if candidate.is_file():
+            PAPER_FILE = str(candidate.resolve())
+            return PAPER_FILE
+    gr.Warning("论文 PDF 尚未生成，请先完成研究与论文写作。")
+    return None
 
 def return_paper_log_file():
     return PAPER_LOG

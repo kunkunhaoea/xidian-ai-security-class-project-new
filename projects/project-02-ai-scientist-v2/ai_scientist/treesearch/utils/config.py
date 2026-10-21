@@ -128,6 +128,13 @@ def _load_cfg(
     cfg = OmegaConf.load(path)
     if use_cli_args:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_cli())
+    # Optional helper roles must stay on the user's configured model provider.
+    for role in ("summary", "select_node"):
+        if cfg.agent.get(role) is None:
+            cfg.agent[role] = {
+                "model": cfg.agent.feedback.model,
+                "temp": cfg.agent.feedback.get("temp", 0.3),
+            }
     return cfg
 
 

@@ -194,3 +194,8 @@ final_papers/
 # HF
 cache/
 huggingface/
+
+# Local Codex configuration, skills, sessions, and credentials
+.codex/
+.agents/
+.aws/

@@ -47,9 +47,10 @@ def search_github_repos(context_variables, query, limit=5):
         url = f'https://api.github.com/search/repositories?q={encoded_query}&per_page={per_page}&page={page}'
 
         headers = {
-            'Authorization': f'token {GITHUB_AI_TOKEN}',
             'Accept': 'application/vnd.github.v3+json'
         }
+        if GITHUB_AI_TOKEN and GITHUB_AI_TOKEN.strip():
+            headers['Authorization'] = f'token {GITHUB_AI_TOKEN.strip()}'
 
         response = requests.get(url, headers=headers)
 

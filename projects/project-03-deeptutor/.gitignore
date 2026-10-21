@@ -13,7 +13,6 @@ data/
 /design-qa.md
 /site/
 .claude
-.agents/
 .workbuddy/
 
 # LaTeX build artifacts
@@ -285,3 +284,8 @@ dmypy.json
 *.mp3
 *.wav
 *.ogg
+
+# Local Codex configuration, skills, sessions, and credentials
+.codex/
+.agents/
+.aws/
