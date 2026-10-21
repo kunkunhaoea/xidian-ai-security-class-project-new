@@ -47,6 +47,9 @@ def query(
     if filtered_kwargs.get("model", "").startswith("ollama/"):
        filtered_kwargs["model"] = filtered_kwargs["model"].replace("ollama/", "")
 
+    if filtered_kwargs.get("model", "").startswith("deepseek-"):
+        filtered_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
     t0 = time.time()
     completion = backoff_create(
         client.chat.completions.create,

@@ -1,4 +1,5 @@
 # Local credentials and environment files
+.aws/
 .env
 .env.*
 !.env.example
@@ -7,6 +8,11 @@
 *.pem
 *.key
 credentials.json
+# Local Codex/agent configuration, credentials, sessions, and history
+.codex/
+.agents/
+# Personal research materials and generated experiment artifacts
+/shared/
 # Dependencies and caches
 .venv/
 venv/

@@ -40,7 +40,14 @@ class Memory:
             self.embedder = lambda x: [i.embedding for i in openai_client.embeddings.create(input=x, model=embedding_model).data]
         else:
             # self.embedder = embedding_functions.DefaultEmbeddingFunction()
-            self.embedder = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+            local_model_path = os.getenv("LOCAL_EMBEDDING_MODEL_PATH", "").strip()
+            if local_model_path:
+                local_model_path = os.path.expanduser(local_model_path)
+                if not os.path.isabs(local_model_path) or not os.path.isdir(local_model_path):
+                    raise ValueError("LOCAL_EMBEDDING_MODEL_PATH must be an existing absolute directory")
+            self.embedder = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=local_model_path or "all-MiniLM-L6-v2"
+            )
 
     def add_query(
             self,

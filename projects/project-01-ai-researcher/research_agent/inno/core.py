@@ -146,6 +146,9 @@ class MetaChain:
             "base_url": API_BASE_URL,
         }
 
+        if create_params["model"].rsplit("/", 1)[-1].startswith("deepseek-"):
+            create_params["extra_body"] = {"thinking": {"type": "disabled"}}
+
         if create_params['model'].startswith("mistral"):
             messages = create_params["messages"]
             for message in messages:
@@ -382,6 +385,8 @@ class MetaChain:
                 "stream": stream,
                 "base_url": API_BASE_URL,
             }
+            if create_model.rsplit("/", 1)[-1].startswith("deepseek-"):
+                create_params["extra_body"] = {"thinking": {"type": "disabled"}}
             NO_SENDER_MODE = False
             for not_sender_model in NOT_SUPPORT_SENDER:
                 if not_sender_model in create_model:

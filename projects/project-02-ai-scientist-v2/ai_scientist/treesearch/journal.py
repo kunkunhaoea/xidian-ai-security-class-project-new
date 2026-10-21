@@ -593,7 +593,7 @@ class Journal:
             "Node Summaries": node_summaries,
             "Best Node": (
                 {
-                    "id": self.get_best_node().id,
+                    "id": self.get_best_node(cfg=cfg).id,
                     "metric": str(self.get_best_node(cfg=cfg).metric),
                 }
                 if self.get_best_node(cfg=cfg)

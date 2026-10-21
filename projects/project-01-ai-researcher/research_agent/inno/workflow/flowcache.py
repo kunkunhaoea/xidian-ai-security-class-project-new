@@ -57,6 +57,16 @@ class AgentModule:
             agent_name_norm = agent_name_norm + f"_iter_{iter_times}"
         cache_file = f"{self.cache_path}/agents/{agent_name_norm}.json"
         if os.path.exists(cache_file):
+            if agent_name == "Prepare Agent":
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                result = (cached.get("context_variables") or {}).get("prepare_result")
+                required = ("reference_codebases", "reference_paths", "reference_papers")
+                if not isinstance(result, dict) or not all(
+                    isinstance(result.get(key), list) for key in required
+                ):
+                    print("Ignoring incomplete Prepare Agent cache; running this stage again.")
+                    return None, False
             choice = single_select_menu(["Yes", "Resume", "No"], f"The agent '{agent_name}' cache file exists, do you want to use it?")
             if choice == "Yes":
                 with open(cache_file, "r", encoding="utf-8") as f:

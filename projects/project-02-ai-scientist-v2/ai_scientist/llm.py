@@ -10,7 +10,10 @@ import openai
 
 MAX_NUM_TOKENS = 4096
 
+DEEPSEEK_MODELS = ("deepseek-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash")
+
 AVAILABLE_LLMS = [
+    *DEEPSEEK_MODELS,
     "claude-3-5-sonnet-20240620",
     "claude-3-5-sonnet-20241022",
     # OpenAI models
@@ -214,6 +217,15 @@ def get_batch_responses_from_llm(
 
 @track_token_usage
 def make_llm_call(client, model, temperature, system_message, prompt):
+    if model in DEEPSEEK_MODELS:
+        # Keep conversation history text-only; reasoning_content is not persisted.
+        return client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system_message}, *prompt],
+            temperature=temperature,
+            max_tokens=MAX_NUM_TOKENS,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
     if model.startswith("ollama/"):
         return client.chat.completions.create(
             model=model.replace("ollama/", ""),
@@ -324,7 +336,7 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif "gpt" in model:
+    elif "gpt" in model or model in DEEPSEEK_MODELS:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = make_llm_call(
             client,
@@ -478,6 +490,11 @@ def extract_json_between_markers(llm_output: str) -> dict | None:
 
 
 def create_client(model) -> tuple[Any, str]:
+    if model in DEEPSEEK_MODELS:
+        return openai.OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY"),
+            base_url=os.getenv("OPENAI_BASE_URL") or "https://api.deepseek.com",
+        ), model
     if model.startswith("claude-"):
         print(f"Using Anthropic API with model {model}.")
         return anthropic.Anthropic(), model

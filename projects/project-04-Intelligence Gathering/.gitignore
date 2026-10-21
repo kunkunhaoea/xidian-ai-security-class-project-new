@@ -24,3 +24,8 @@ tmp/
 
 # Local publishing checkout
 .course-publish/
+
+# Local Codex configuration, skills, sessions, and credentials
+.codex/
+.agents/
+.aws/

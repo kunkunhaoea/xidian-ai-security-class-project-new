@@ -30,3 +30,8 @@ research_agent/.env
 research_agent/*_tmp/*
 
 .env
+
+# Local Codex configuration, skills, sessions, and credentials
+.codex/
+.agents/
+.aws/
