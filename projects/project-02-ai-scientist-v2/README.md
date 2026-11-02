@@ -91,3 +91,19 @@ python launch_scientist_bfts.py \
 ## 6. 课程提交
 
 提交配置变更（不含密钥）、代码、实验记录摘要及复现说明，保留 [许可证](LICENSE)。本项目与项目 04 的实验适配层没有完成兼容验证，不能直接假设可互接。本课程源码整理时的上游版本为 `96bd51617cfdbb494a9fc283af00fe090edfae48`；本说明经源码核对，未执行完整实验。
+
+## 7. 执行可靠性改进与离线测试
+
+启动器会在正常结束、异常和 Ctrl+C 时清理本任务的子进程，清理范围限定为当前进程树。解释器超时后先发送一次 SIGINT，默认等待最多 5 秒，再终止未响应的进程；超时会返回 `TimeoutError` 并丢弃该会话，下一次使用默认的 `reset_session=True` 重新启动。
+
+实验输出暂存于工作目录中的临时文件，清理会话时删除；`ExecutionResult.term_out` 仍返回文本列表。输出在异常退出前逐次刷新，因此强制终止后也能读取已有输出。`timeout=None` 可关闭执行时限，有限时限必须为正数。
+
+仅验证执行器和进程清理时，无需安装 PyTorch、配置 API Key 或调用模型。在 Python 3.11+ 的独立环境中，从本项目目录执行：
+
+```bash
+python -m pip install humanize dataclasses-json shutup psutil
+python -m unittest discover -s tests -v
+python launch_scientist_bfts.py --help
+```
+
+真实进程清理测试需要系统允许查询本用户的进程树。完整科研流程仍需按前文配置 GPU、模型和论文工具。改动依据、测试结果和局限见 [开发日志](log/2026-11-02-execution-reliability.md)。
