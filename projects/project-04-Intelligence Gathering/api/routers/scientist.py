@@ -34,7 +34,7 @@ from pipeline.research_intelligence import (
     record_generated_ideas,
     sync_obsidian,
 )
-from pipeline.analysis_service import available_themes
+from pipeline.analysis_service import available_themes, task_model_settings
 from pipeline.topic_taxonomy import canonical_topic
 
 router = APIRouter(prefix="/scientist", tags=["scientist"])
@@ -316,9 +316,10 @@ class IdeaGenerationError(RuntimeError):
 
 
 async def _call_llm(payload: dict[str, Any]) -> str:
-    api_key = os.getenv("AI_API_KEY", "").strip()
-    base_url = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("AI_MODEL", "gpt-5.6-sol")
+    settings = task_model_settings.get() or {}
+    api_key = settings.get("api_key", os.getenv("AI_API_KEY", "")).strip()
+    base_url = settings.get("base_url", os.getenv("AI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
+    model = settings.get("model", os.getenv("AI_MODEL", "gpt-5.6-sol"))
     if not api_key:
         raise IdeaGenerationError("未配置 AI_API_KEY，无法使用 AI 生成。")
     try:
@@ -707,15 +708,22 @@ def _parse_ideas(text: str | None, count: int) -> list[dict[str, Any]]:
         return []
 
 
-async def _generate_research_ideas(count: int, theme: str = "", strategy: str = "v2_reflection", reflections: int = 2, allow_rule_fallback: bool = False) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+async def _generate_research_ideas(count: int, theme: str = "", strategy: str = "v2_reflection", reflections: int = 2, allow_rule_fallback: bool = False, *, selected_context: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     theme = _clean_text(theme)
-    trends, records, candidates, media_directions, media_topics = _filter_idea_context(theme)
+    if selected_context is None:
+        trends, records, candidates, media_directions, media_topics = _filter_idea_context(theme)
+    else:
+        # File snapshots are the only research context in the workbench path.
+        # Never query global history or project02's knowledge base here.
+        trends, candidates, media_directions, media_topics = [], [], [], []
+        records = [{"title": d["title"], "text": d["text"], "source_url": d["path"], "platform": "shared"}
+                   for d in selected_context["documents"]]
     trend_context = [
         {"topic_id": trend.get("topic_id"), "label": trend.get("label") or trend.get("topic"), "summary": trend.get("summary") or f"{trend.get('document_count', 0)} 条文档、{trend.get('evidence_count', 0)} 条证据、趋势 {trend.get('trend', 'stable')}", "keywords": trend.get("keywords"), "metrics": trend.get("metrics") or {}, "score": trend.get("score") or trend.get("quality_score")}
         for trend in trends
     ]
     record_context = [
-        {"title": record.get("title"), "platform": record.get("platform"), "content": str(record.get("content") or record.get("text") or "")[:500], "source_url": record.get("source_url"), "topic_mappings": record.get("topic_mappings") or []}
+        {"title": record.get("title"), "platform": record.get("platform"), "content": str(record.get("content") or record.get("text") or "") if selected_context is not None else str(record.get("content") or record.get("text") or "")[:500], "source_url": record.get("source_url"), "topic_mappings": record.get("topic_mappings") or []}
         for record in records
     ]
     candidate_context = [
@@ -733,9 +741,15 @@ async def _generate_research_ideas(count: int, theme: str = "", strategy: str = 
          "representative_terms": item.get("representative_terms"), "trend": item.get("trend"), "quality_score": item.get("quality_score")}
         for item in media_topics
     ]
-    knowledge_update, discovered_papers = await _refresh_v2_knowledge_base(theme, media_directions)
-    workshop_path, workshop_content, references = _build_workshop(theme, records, media_directions, media_topics)
-    kb_papers, kb_summaries, kb_note = _load_v2_knowledge_base(references, theme)
+    if selected_context is None:
+        knowledge_update, discovered_papers = await _refresh_v2_knowledge_base(theme, media_directions)
+        workshop_path, workshop_content, references = _build_workshop(theme, records, media_directions, media_topics)
+        kb_papers, kb_summaries, kb_note = _load_v2_knowledge_base(references, theme)
+    else:
+        references = [d["path"] for d in selected_context["documents"]]
+        workshop_content = "# 当前选定研究资料\n" + "\n".join(references)
+        kb_summaries = "只使用本次显式选择的shared正文，未读取全局历史知识库。"
+        discovered_papers = selected_context.get("external", [])
     payload = {
         "ai_scientist_v2_workshop": workshop_content,
         "ai_scientist_v2_references": references,
@@ -758,11 +772,15 @@ async def _generate_research_ideas(count: int, theme: str = "", strategy: str = 
             "每项必须明确：攻击面/机制、核心自变量与因变量、至少一个可获得基准或数据来源、两个比较基线，以及成功判据。"
         ),
     }
-    basis = _basis_preview(theme)
-    basis["workshop"] = {"path": str(workshop_path), "reference_count": len(references), "references": references}
-    basis["knowledge_base"] = {"path": str(_v2_knowledge_base_dir()), "papers": kb_papers, "note": kb_note, "auto_update": knowledge_update}
+    if selected_context is None:
+        basis = _basis_preview(theme)
+        basis["workshop"] = {"path": str(workshop_path), "reference_count": len(references), "references": references}
+        basis["knowledge_base"] = {"path": str(_v2_knowledge_base_dir()), "papers": kb_papers, "note": kb_note, "auto_update": knowledge_update}
+    else:
+        basis = {"selected_files": references, "warnings": selected_context.get("warnings", []),
+                 "external": selected_context.get("external", []), "external_status": selected_context.get("external_status", "未检索")}
     if strategy == "v2_novelty":
-        novelty = discovered_papers or await _openalex_novelty_context(theme, media_directions, candidates)
+        novelty = discovered_papers if selected_context is not None else discovered_papers or await _openalex_novelty_context(theme, media_directions, candidates)
         payload["openalex_novelty_check"] = novelty
         payload["instruction"] += " 以 ai_scientist_v2_workshop 和 ai_scientist_v2_knowledge_base 为主要学术基础，将 MediaCrawler 证据作为发现研究缺口和验证研究价值的辅助依据。使用 AI-Scientist-v2 Codex 路线的约束：以下 OpenAlex 结果只用于排除已发表的相似工作，不可将其虚构为本项目证据；输出必须清楚说明与给定材料的差异。"
         basis["openalex"] = novelty
@@ -777,7 +795,7 @@ async def _generate_research_ideas(count: int, theme: str = "", strategy: str = 
         for round_index in range(1, reflections + 1):
             reflection_payload = {
                 "selected_theme": theme or "全部主题",
-                "evidence_basis": {"trends": trend_context, "candidates": candidate_context, "crawler_research_directions": direction_context},
+                "evidence_basis": {"trends": trend_context, "candidates": candidate_context, "crawler_research_directions": direction_context, **({"selected_records": record_context} if selected_context is not None else {})},
                 "draft_ideas": ideas,
                 "instruction": (
                     f"这是 AI-Scientist-v2 风格的第 {round_index}/{reflections} 轮反思。逐项检查草案的可验证性、"

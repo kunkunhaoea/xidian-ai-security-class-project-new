@@ -75,7 +75,7 @@ class WorkspaceReadTool(BaseTool):
         return ToolDefinition(
             name="workspace_read",
             description=(
-                "Read a UTF-8 text file from the user's active workspace. Paths are relative "
+                "Read a UTF-8 text file (or extract text from a PDF in shared-topic chats) from the user's active workspace. Paths are relative "
                 "to the workspace; use workspace_list or workspace_search to discover them."
             ),
             parameters=[
@@ -100,15 +100,29 @@ class WorkspaceReadTool(BaseTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
             service, binding = _binding(kwargs)
-            result = await asyncio.to_thread(
-                service.read_text,
-                binding,
-                str(kwargs.get("path") or ""),
-                offset=int(kwargs.get("offset") or 0),
-                limit=int(kwargs.get("limit") or 20_000),
-            )
-        except WorkspaceError as exc:
-            return _failure(exc)
+            path = str(kwargs.get("path") or "")
+            offset = max(0, int(kwargs.get("offset") or 0))
+            limit = max(1, min(int(kwargs.get("limit") or 20_000), 100_000))
+            if kwargs.get("_workbench_topic") and path.lower().endswith(".pdf"):
+                from deeptutor.services.workbench import shared_discussion
+                bridge = shared_discussion()
+                prepared = await asyncio.to_thread(bridge.store.read_inputs, kwargs["_workbench_topic"], [path])
+                document = prepared["documents"][0]
+                result = {"path": path, "content": document["text"][offset:offset+limit], "offset": offset,
+                          "total_chars": document["original_chars"], "truncated": offset+limit < document["original_chars"], "warnings": prepared["warnings"]}
+            else:
+                result = await asyncio.to_thread(
+                    service.read_text, binding, path, offset=offset, limit=limit,
+                )
+            if kwargs.get("_workbench_topic"):
+                import hashlib
+                from deeptutor.services.workbench import shared_discussion
+                bridge = shared_discussion()
+                bridge.record_read(kwargs["_workbench_topic"], kwargs["_workbench_session_id"], kwargs["_workbench_turn_id"], path,
+                                   result["content"], offset=offset, original_chars=result["total_chars"],
+                                   sha256=hashlib.sha256(bridge.store.path(kwargs["_workbench_topic"], path).read_bytes()).hexdigest())
+        except (ValueError, OSError) as exc:
+            return ToolResult(content=str(exc), success=False)
         content = result.pop("content")
         return ToolResult(content=content, metadata={"workspace_read": result})
 
@@ -214,6 +228,42 @@ class WorkspacePresentTool(BaseTool):
             sources=[{"type": "workspace_item", **row} for row in rows],
             metadata={"workspace_items": rows},
         )
+
+
+class WorkspaceSaveTool(BaseTool):
+    """Save model-authored text without unrestricted shell/file access."""
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="workspace_save",
+            description="Save generated UTF-8 text in this turn's outputs folder and present it. Never overwrites an existing file. Use for notes, plans and drafts requested by the user.",
+            parameters=[ToolParameter(name="filename", type="string", description="Short filename ending in .md or .txt"),
+                        ToolParameter(name="content", type="string", description="Complete generated text to save")],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        try:
+            from pathlib import PurePosixPath
+            from deeptutor.services.workbench import shared_discussion
+
+            service, binding = _binding(kwargs)
+            bridge = shared_discussion()
+            topic = bridge.topic_for_root(binding.root)
+            directory = str(kwargs.get("_workspace_output_dir") or "")
+            if len(PurePosixPath(directory).parts) != 4 or not directory.startswith("outputs/"):
+                raise WorkspaceError("Missing trusted turn output directory")
+            filename = str(kwargs.get("filename") or "")
+            if "/" in filename or "\\" in filename or PurePosixPath(filename).suffix.lower() not in {".md", ".txt"}:
+                raise WorkspaceError("Please use a simple .md or .txt filename")
+            content = str(kwargs.get("content") or "")
+            if not content.strip() or len(content.encode("utf-8")) > 1024 * 1024:
+                raise WorkspaceError("Generated text must be nonempty and at most 1MB")
+            relative = bridge.store.write_new(topic, directory, filename, content)
+            items = service.publish(binding, [{"path": relative}])
+            rows = [item.to_dict() for item in items]
+            return ToolResult(content=f"Saved {relative}", sources=[{"type": "workspace_item", **row} for row in rows], metadata={"workspace_items": rows})
+        except (ValueError, OSError) as exc:
+            return ToolResult(content=str(exc), success=False)
 
 
 class WorkspaceExportTool(BaseTool):
@@ -328,6 +378,7 @@ class WorkspaceExportTool(BaseTool):
 
 
 __all__ = [
+    "WorkspaceSaveTool",
     "WorkspaceExportTool",
     "WorkspaceListTool",
     "WorkspacePresentTool",

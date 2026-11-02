@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 ANALYSIS_DIR = DATA_DIR / "analysis"
 load_dotenv(PROJECT_ROOT / ".env")
+
+# Optional per-task settings keep concurrent workbench operations independent of
+# settings edited by another page. Credentials stay only in memory.
+task_model_settings: ContextVar[dict | None] = ContextVar("task_model_settings", default=None)
 
 AI_SAFETY_TAXONOMY = {label: list(spec["aliases"]) for label, spec in TOPIC_TAXONOMY.items()}
 
@@ -255,13 +260,14 @@ async def _ai_enrich(item: dict[str, Any]) -> dict[str, Any]:
         return item
 
 
-async def _summarize_batch(items: list[dict[str, Any]], batch_number: int) -> dict[str, Any]:
+async def _summarize_batch(items: list[dict[str, Any]], batch_number: int, *, strict: bool = False) -> dict[str, Any]:
     """Create one grounded observation for a representative block of records."""
-    api_key = os.getenv("AI_API_KEY", "").strip()
+    settings = task_model_settings.get() or {}
+    api_key = settings.get("api_key", os.getenv("AI_API_KEY", "")).strip()
     if not api_key:
         return {}
     source_items = [
-        {"title": item["title"][:160], "text": item["text"][:360]}
+        {"title": item["title"][:160], "text": item["text"] if strict else item["text"][:360]}
         for item in items
     ]
     prompt = {
@@ -272,14 +278,52 @@ async def _summarize_batch(items: list[dict[str, Any]], batch_number: int) -> di
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=8.0)) as client:
             response = await client.post(
-                f"{os.getenv('AI_BASE_URL', 'https://api.openai.com/v1').rstrip('/')}/chat/completions",
+                f"{settings.get('base_url', os.getenv('AI_BASE_URL', 'https://api.openai.com/v1')).rstrip('/')}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
-                json={"model": os.getenv("AI_MODEL", "gpt-4o-mini"), "temperature": 0.1, "response_format": {"type": "json_object"}, "messages": [{"role": "system", "content": "你是严谨的资料分析助手。"}, {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]},
+                json={"model": settings.get("model", os.getenv("AI_MODEL", "gpt-4o-mini")), "temperature": 0.1, "response_format": {"type": "json_object"}, "messages": [{"role": "system", "content": "你是严谨的资料分析助手。"}, {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]},
             )
             response.raise_for_status()
-            return json.loads(response.json()["choices"][0]["message"]["content"])
-    except Exception:
+            result = json.loads(response.json()["choices"][0]["message"]["content"])
+            if strict and (not isinstance(result, dict) or not str(result.get("summary", "")).strip()):
+                raise ValueError("模型没有返回有效总结")
+            return result
+    except Exception as exc:
+        if strict:
+            raise RuntimeError(f"第{batch_number}批AI总结失败：{type(exc).__name__}；未静默回退为AI成功") from exc
         return {}
+
+
+async def analyze_records(rows: list[dict[str, Any]], selected_themes: list[str], custom_themes: list[str]) -> dict[str, Any]:
+    """Analyze explicit workbench inputs without database ingestion or vault sync.
+
+    Callers supply <=2500-character chunks so normalization keeps their full text.
+    Legacy analyze_file and its export behavior remain unchanged.
+    """
+    taxonomy = _analysis_taxonomy(selected_themes, custom_themes)
+    if not taxonomy:
+        raise ValueError("请至少选择一个领域或填写自定义领域")
+    seen, items = set(), []
+    excluded = 0
+    for row in rows:
+        normalized = _normalize(row)
+        key = _fingerprint(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        item = _rule_analysis(normalized, taxonomy)
+        if not item["research_domains"]:
+            excluded += 1
+            continue
+        items.append(item)
+    summaries = []
+    ai = bool((task_model_settings.get() or {}).get("api_key", os.getenv("AI_API_KEY", "")).strip())
+    if ai:
+        for index in range(0, len(items), 10):
+            summaries.append({"batch": index // 10 + 1, "record_count": len(items[index:index+10]),
+                              **await _summarize_batch(items[index:index+10], index // 10 + 1, strict=True)})
+    return {"items": items, "batch_summaries": summaries, "intelligence": _build_research_intelligence(items),
+            "input_count": len(rows), "output_count": len(items), "scope_excluded": excluded,
+            "method": "规则分类＋AI分批总结" if ai and items else "规则分析（未调用AI）"}
 
 
 async def _summarize_batches(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

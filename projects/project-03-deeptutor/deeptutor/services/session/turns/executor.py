@@ -997,6 +997,9 @@ class TurnExecutor:
                 },
             )
 
+            from deeptutor.services.workbench import apply_shared_context
+            await asyncio.to_thread(apply_shared_context, context)
+
             pending_done_event: StreamEvent | None = None
             async for event in self.turn_engine.execute(context):
                 if event.type == StreamEventType.SESSION:

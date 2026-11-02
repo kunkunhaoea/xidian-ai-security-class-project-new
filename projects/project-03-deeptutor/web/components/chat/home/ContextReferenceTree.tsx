@@ -18,6 +18,9 @@ export interface ContextTreeItem {
   kind: string;
   /** Item title; truncates. */
   label: string;
+  /** Compact state for live shared-file references. */
+  status?: string;
+  title?: string;
   /** 16px thumbnail for image attachments — replaces the icon. */
   thumbnailUrl?: string;
   /** Optional click action (e.g. open attachment preview). */

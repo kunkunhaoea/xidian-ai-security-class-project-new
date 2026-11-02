@@ -1,6 +1,7 @@
 "use client";
 
 import { readingCollectionRoute } from "@/lib/learning-routes";
+import ArchiveGeneratedFile from "@/components/workspaces/ArchiveGeneratedFile";
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
@@ -265,6 +266,7 @@ export default function FilePreviewDrawer({
               </Tooltip>
             )}
 
+            <ArchiveGeneratedFile key={renderedSource.url || renderedSource.filename} url={renderedSource.url} filename={filename} />
             {downloadUrl && (
               <Tooltip label={t("Download")} side="bottom">
                 <a

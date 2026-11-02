@@ -290,6 +290,7 @@ export default memo(function ChatComposer({
   inputPlaceholder,
   inputPlaceholderCompletion,
   inputHeader,
+  sharedFiles = [],
   showCapabilityChip = true,
 }: {
   composerRef: RefObject<HTMLDivElement | null>;
@@ -452,6 +453,7 @@ export default memo(function ChatComposer({
    * of the message being written instead of a card floating over it.
    */
   inputHeader?: ReactNode;
+  sharedFiles?: ContextTreeItem[];
   /**
    * Hide the capability chip. A surface that only ever runs one capability
    * — and names it in its own chrome — gains nothing from a picker that
@@ -722,6 +724,7 @@ export default memo(function ChatComposer({
   };
   // One selection summary for files, references, and conversation resources.
   const contextTreeItems: ContextTreeItem[] = [
+    ...sharedFiles,
     ...attachments.map((file, index): ContextTreeItem => ({key:`file-${index}`, icon:Paperclip, kind:t("Attach files"),label:file.filename,thumbnailUrl:file.type === "image" ? file.previewUrl : undefined,onClick:()=>onPreviewAttachment?.(index),onRemove:()=>onRemoveAttachment(index)})),
     ...selectedKnowledgeBases.map((id): ContextTreeItem => ({key:`kb-${id}`,icon:Database,kind:t("Knowledge"),label:knowledgeBases.find(kb=>knowledgeBaseRef(kb)===id)?.name || id,onRemove:()=>onToggleKB(id)})),
     ...(personaSelection ? [{key:"persona-scope",icon:UserRound,kind:t("Response style"),label:personaSelection,onRemove:()=>onPersonaSelectionChange?.("")}] : []),

@@ -1,6 +1,7 @@
 "use client";
 
 import { COMMAND_CONFIRMATION_FAILED } from "@/features/chat/transport/command-delivery";
+import { useSharedTopicFiles } from "@/components/workspaces/useSharedTopicFiles";
 
 import { ResourceReuseContext, useResourceReusePolicy } from "@/components/chat/home/ResourceReuse";
 import { retainedKnowledgeBases } from "@/lib/resource-reuse";
@@ -800,7 +801,7 @@ export default function ChatWorkspace({
     setAskHint("");
   }, [state.sessionId]);
   useEffect(() => {
-    if (state.isStreaming || !hasMessages || !state.sessionId) return;
+    if (state.isStreaming || !hasMessages || !state.sessionId || state.sessionId.startsWith("wb_")) return;
     let cancelled = false;
     void fetchSessionAskHint(state.sessionId).then((hint) => {
       if (!cancelled) setAskHint(hint);
@@ -1694,6 +1695,7 @@ export default function ChatWorkspace({
   const handlePreviewMessageAttachment = useCallback((a: MessageAttachment) => {
     viewerPanelRef.current?.openFileTab(a);
   }, []);
+  const sharedFiles = useSharedTopicFiles(state.sessionId, searchParams.get("dt_workspace") || "", state.isStreaming, handlePreviewMessageAttachment);
 
   // Event-delegated link interception inside the messages container. When
   // the user clicks an http(s) link in an assistant message, we open it as
@@ -2763,6 +2765,8 @@ export default function ChatWorkspace({
                 spaceMenuOpen={spaceMenuOpen}
                 hasMessages={hasMessages}
                 attachments={attachments}
+                sharedFiles={sharedFiles.items}
+                inputHeader={sharedFiles.error ? <p role="alert" className="px-3 pt-2 text-sm text-red-600">{sharedFiles.error}</p> : undefined}
                 attachmentError={attachmentError}
                 attachmentProcessing={attachmentProcessing}
                 activeCap={activeCap}
@@ -2863,7 +2867,7 @@ export default function ChatWorkspace({
                 it through the normal send path: this page is already a draft
                 session when it has no messages, so that both creates the
                 session and starts it on the topic. */}
-              {!hasMessages ? (
+              {!hasMessages && !state.sessionId?.startsWith("wb_") && !sessionIdParam?.startsWith("wb_") ? (
                 <StarterSuggestions
                   workspaceId={state.workspaceId || ""}
                   onPick={(prompt) => void handleSend(prompt)}

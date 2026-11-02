@@ -31,6 +31,7 @@ _ALLOWED_ROOTS_ENV = "DEEPTUTOR_WORKSPACE_ALLOWED_ROOTS"
 _INTERNAL_DIR = ".deeptutor"
 _MAX_SEARCH_SCAN_ENTRIES = 10_000
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
+_SHARED_TOPICS = Path(__file__).resolve().parents[5] / "shared" / "topics"
 
 
 def _utc_now() -> str:
@@ -336,6 +337,12 @@ class ContentWorkspaceService(WorkspaceCatalogMixin):
         self, binding: WorkspaceBinding, relative_path: str, *, write: bool = False
     ) -> Path:
         relative = _normalise_relative(relative_path)
+        # Shared topic sessions must not expose their private handoffs/session
+        # stores, nor follow symlinks (including links within the same topic).
+        if binding.root.parent.resolve() == _SHARED_TOPICS.resolve():
+            if any(part.startswith(".") for part in PurePosixPath(relative).parts):
+                raise WorkspaceError("Private topic runtime data is not research input.")
+            self._assert_no_symlink_components(binding, relative, operation="shared topic")
         if write and PurePosixPath(relative).parts[0] != "outputs":
             raise WorkspaceError("Writes outside outputs require an explicit user grant.")
         candidate = (binding.root / Path(*PurePosixPath(relative).parts)).resolve()

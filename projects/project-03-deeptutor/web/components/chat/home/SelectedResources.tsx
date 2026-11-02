@@ -57,7 +57,8 @@ export default function SelectedResources({
                   type="button"
                   disabled={!item.onClick}
                   onClick={item.onClick}
-                  aria-label={`${item.kind} · ${item.label}`}
+                  title={item.title}
+                  aria-label={`${item.kind} · ${item.label}${item.status ? ` · ${item.status}` : ""}`}
                   className="flex min-w-0 items-center gap-1.5 text-left disabled:cursor-default"
                 >
                   {item.thumbnailUrl ? (
@@ -73,8 +74,9 @@ export default function SelectedResources({
                     />
                   )}
                   <span className="truncate">{item.label}</span>
+                  {item.status && <span className="shrink-0 text-[var(--muted-foreground)]">{item.status}</span>}
                 </button>
-                <Tooltip label={t(repeat ? "Every turn" : "This turn only")} side="top">
+                {kind && <Tooltip label={t(repeat ? "Every turn" : "This turn only")} side="top">
                   <span
                     role="img"
                     aria-label={t(repeat ? "Every turn" : "This turn only")}
@@ -86,7 +88,7 @@ export default function SelectedResources({
                       <span className="text-[10px]">{t("This turn only")}</span>
                     )}
                   </span>
-                </Tooltip>
+                </Tooltip>}
                 {item.onRemove && (
                   <Tooltip label={`${t("Remove")} ${item.label}`} side="top">
                     <button

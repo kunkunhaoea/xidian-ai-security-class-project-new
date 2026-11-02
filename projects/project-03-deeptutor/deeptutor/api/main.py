@@ -594,6 +594,9 @@ _auth = [Depends(require_learning_surface)]
 # (single-user local runs are implicitly admin — no behaviour change there).
 _admin = [Depends(require_admin)]
 
+from deeptutor.api.routers import workbench as workbench_bridge
+app.include_router(workbench_bridge.router, prefix="/api/workbench-bridge", tags=["workbench"], dependencies=_admin)
+
 app.include_router(
     multi_user_router,
     prefix="/api/multi-user",

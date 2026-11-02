@@ -78,6 +78,7 @@ BUILTIN_TOOL_SPECS: tuple[BuiltinToolSpec, ...] = (
             ("workspace_read", "WorkspaceReadTool"),
             ("workspace_search", "WorkspaceSearchTool"),
             ("workspace_present", "WorkspacePresentTool"),
+            ("workspace_save", "WorkspaceSaveTool"),
             ("workspace_export", "WorkspaceExportTool"),
         ),
     ),

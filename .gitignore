@@ -12,7 +12,8 @@ credentials.json
 .codex/
 .agents/
 # Personal research materials and generated experiment artifacts
-/shared/
+/shared/*
+!/shared/README.md
 # Dependencies and caches
 .venv/
 venv/

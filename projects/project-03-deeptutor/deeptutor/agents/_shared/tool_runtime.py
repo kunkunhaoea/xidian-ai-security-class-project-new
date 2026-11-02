@@ -57,6 +57,10 @@ def bind_workspace_tool_runtime(
 
     if tool_name.startswith("workspace_") and workspace is not None:
         kwargs["_workspace_id"] = workspace.workspace_id
+        kwargs["_workspace_output_dir"] = workspace.logical_output_dir
+        kwargs["_workbench_topic"] = context.metadata.get("workbench_topic")
+        kwargs["_workbench_session_id"] = context.session_id
+        kwargs["_workbench_turn_id"] = context.runtime.turn_id
         kwargs["_language"] = context.language or "en"
 
     if tool_name in {"exec"} or tool_name.startswith(CLI_APP_TOOL_PREFIX):

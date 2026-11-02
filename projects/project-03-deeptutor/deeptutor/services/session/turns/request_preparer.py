@@ -174,6 +174,16 @@ class TurnRequestPreparer:
         session = await self.store.ensure_session(payload.get("session_id"))
         preferences = session.get("preferences") or {}
 
+        from deeptutor.services.workbench import linked_session
+        shared_session = linked_session(session["id"], str(preferences.get("workspace_id") or ""))
+        if shared_session:
+            if payload.get("capability") not in {None, "", "chat"}:
+                raise RuntimeError("共享资料会话当前支持普通对话；其他能力请在独立DeepTutor会话中使用。")
+            if any(payload.get(key) for key in ("knowledge_bases", "notebook_references", "history_references", "book_references", "reading_references", "memory_references", "partner_group_references", "question_notebook_references")):
+                raise RuntimeError("共享课题会话请通过工作台明确选择资料，不附加全局知识库或历史记录。")
+            routing_enabled = False
+            payload["capability"] = "chat"
+
         # A conversation-level choice wins over the account default that the
         # browser sends on every turn. Only the selector's explicit field may
         # change or clear this durable override (#1511).

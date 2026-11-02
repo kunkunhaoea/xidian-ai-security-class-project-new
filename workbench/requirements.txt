@@ -1,0 +1,2 @@
+# Install into Conda 04; existing project04 requirements remain unchanged.
+pypdf>=5,<7

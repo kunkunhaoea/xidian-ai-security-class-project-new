@@ -25,6 +25,7 @@ import asyncio
 import os
 import sys
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
@@ -41,10 +42,20 @@ from .routers import crawler_router, data_router, scientist_router, websocket_ro
 # Project root directory (used for running subprocesses like uv run main.py)
 PROJECT_ROOT = Path(__file__).parent.parent
 
+
+@asynccontextmanager
+async def workbench_lifespan(application):
+    await recover_workbench_tasks()
+    try:
+        yield
+    finally:
+        await stop_workbench_tasks()
+
 app = FastAPI(
     title="MediaCrawler WebUI API",
     description="API for controlling MediaCrawler from WebUI",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=workbench_lifespan,
 )
 
 # Get webui static files directory
@@ -69,6 +80,50 @@ app.include_router(crawler_router, prefix="/api")
 app.include_router(data_router, prefix="/api")
 app.include_router(scientist_router, prefix="/api")
 app.include_router(websocket_router, prefix="/api")
+
+# Workbench source/build lives outside the original webui; keep the legacy UI intact.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+from adapters.intelligence.http import router as workbench_router, engine as workbench_engine
+app.include_router(workbench_router)
+from adapters.deeptutor.http import create_router as deeptutor_router
+app.include_router(deeptutor_router(workbench_engine.store))
+
+
+async def recover_workbench_tasks():
+    workbench_engine.shutting_down = False
+    workbench_engine.recover()
+
+
+async def stop_workbench_tasks():
+    workbench_engine.shutting_down = True
+    for task in list(workbench_engine.running.values()):
+        task.cancel()
+    if workbench_engine.running:
+        await asyncio.gather(*list(workbench_engine.running.values()), return_exceptions=True)
+
+
+@app.get("/workbench")
+async def workbench_redirect():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse("/workbench/")
+
+
+@app.get("/workbench/{page:path}")
+async def workbench_frontend(page: str):
+    from fastapi import HTTPException
+    build = REPOSITORY_ROOT / "workbench" / "dist"
+    if page.startswith("assets/"):
+        target = (build / page).resolve()
+        if not target.is_relative_to(build.resolve()) or not target.is_file():
+            raise HTTPException(404, "工作台资源不存在")
+        return FileResponse(target)
+    if page.strip("/") not in {"", "materials", "research", "discussion", "tasks", "settings"}:
+        raise HTTPException(404, "工作台页面不存在")
+    if not (build / "index.html").is_file():
+        raise HTTPException(503, "请先在仓库workbench目录执行npm ci和npm run build")
+    return FileResponse(build / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/")

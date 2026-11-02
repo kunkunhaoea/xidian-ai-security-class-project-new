@@ -779,6 +779,13 @@ class AgenticLoopPipeline:
         lookup_get = getattr(self.tool_lookup, "get", None)
         if callable(lookup_get) and lookup_get("workspace_export") is not None:
             composed.append("workspace_export")
+        if context.metadata.get("workbench_topic"):
+            from deeptutor.services.workbench import SHARED_TOOL_NAMES
+            # Only tools with a topic-confined file API are exposed here;
+            # native independent DeepTutor conversations retain their policy.
+            composed = [name for name in composed if name in SHARED_TOOL_NAMES]
+            if callable(lookup_get) and lookup_get("workspace_save") is not None:
+                composed.append("workspace_save")
         return list(dict.fromkeys(composed))
 
     def _mastery_nav_available(self, context: UnifiedContext) -> bool:
@@ -1326,6 +1333,10 @@ class AgenticLoopPipeline:
         args: dict[str, Any],
         context: UnifiedContext,
     ) -> dict[str, Any]:
+        if context.metadata.get("workbench_topic"):
+            from deeptutor.services.workbench import SHARED_TOOL_NAMES
+            if tool_name not in SHARED_TOOL_NAMES:
+                raise ValueError("该工具不在共享课题会话的授权范围内")
         runtime_workspace = context.runtime.workspace
         if runtime_workspace is not None:
             task_dir = None

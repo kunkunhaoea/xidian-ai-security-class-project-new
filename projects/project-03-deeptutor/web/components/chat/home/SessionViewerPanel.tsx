@@ -1,4 +1,5 @@
 "use client";
+import ArchiveGeneratedFile from "@/components/workspaces/ArchiveGeneratedFile";
 
 import { browserStorage } from "@/shared/storage";
 
@@ -360,6 +361,10 @@ function SessionViewerPanelInner(
         const existingIdx = prev.findIndex((tab) => tab.id === id);
         if (existingIdx >= 0) {
           setActiveTabId(id);
+          if (a.id?.startsWith("shared:")) {
+            return prev.map((tab, index) => index === existingIdx && tab.kind === "file"
+              ? {...tab, source: attachmentToPreviewSource(a)} : tab);
+          }
           return prev;
         }
         const label = a.filename || "Attachment";
@@ -1103,6 +1108,7 @@ function FileTabActions({ source }: { source: FilePreviewSource }) {
   const filename = source.filename || t("Attachment");
   return (
     <>
+      <ArchiveGeneratedFile key={source.url || filename} url={source.url} filename={filename}/>
       {fileUrl ? (
         <Tooltip label={t("Download")} side="bottom">
           <a
