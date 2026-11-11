@@ -25,6 +25,7 @@ python-igraph
 coolname
 jsonschema
 omegaconf
+PyYAML
 botocore
 boto3
 psutil

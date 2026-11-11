@@ -6,8 +6,12 @@ import os
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 from contextlib import contextmanager
 from ai_scientist.utils.process_cleanup import cleanup_child_processes
+
+
+EXPERIMENTS_DIR = Path("experiments")
 
 
 def print_time():
@@ -26,6 +30,16 @@ def save_token_tracker(idea_dir):
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Run AI scientist experiments")
     parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Check local experiment inputs and dependencies, then exit",
+    )
+    parser.add_argument(
+        "--config",
+        default="bfts_config.yaml",
+        help="Path to the tree-search YAML configuration",
+    )
+    parser.add_argument(
         "--writeup-type",
         type=str,
         default="icbinb",
@@ -35,7 +49,7 @@ def parse_arguments():
     parser.add_argument(
         "--load_ideas",
         type=str,
-        default="ideas/i_cant_believe_its_not_better.json",
+        default="ai_scientist/ideas/i_cant_believe_its_not_better.json",
         help="Path to a JSON file containing pregenerated ideas",
     )
     parser.add_argument(
@@ -197,7 +211,7 @@ def run_scientist(args):
     idea = ideas[args.idea_idx]
 
     date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    idea_dir = f"experiments/{date}_{idea['Name']}_attempt_{args.attempt_id}"
+    idea_dir = str(EXPERIMENTS_DIR / f"{date}_{idea['Name']}_attempt_{args.attempt_id}")
     print(f"Results will be saved in {idea_dir}")
     os.makedirs(idea_dir, exist_ok=True)
 
@@ -248,9 +262,8 @@ def run_scientist(args):
     with open(idea_path_json, "w") as f:
         json.dump(ideas[args.idea_idx], f, indent=4)
 
-    config_path = "bfts_config.yaml"
     idea_config_path = edit_bfts_config_file(
-        config_path,
+        args.config,
         idea_dir,
         idea_path_json,
     )
@@ -323,6 +336,10 @@ def run_scientist(args):
 
 def main():
     args = parse_arguments()
+    if args.preflight:
+        from ai_scientist.preflight import run_preflight
+
+        return run_preflight(args, EXPERIMENTS_DIR)
     try:
         run_scientist(args)
     finally:
@@ -332,4 +349,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

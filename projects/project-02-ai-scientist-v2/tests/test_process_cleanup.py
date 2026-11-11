@@ -1,3 +1,4 @@
+import argparse
 import subprocess
 import sys
 import unittest
@@ -83,7 +84,7 @@ class ProcessCleanupTests(unittest.TestCase):
 class LauncherCleanupTests(unittest.TestCase):
     def test_cleanup_runs_on_success_error_and_keyboard_interrupt(self):
         for error in (None, RuntimeError("experiment failed"), KeyboardInterrupt()):
-            with self.subTest(error=error), patch.object(launcher, "parse_arguments"), patch.object(
+            with self.subTest(error=error), patch.object(launcher, "parse_arguments", return_value=argparse.Namespace(preflight=False)), patch.object(
                 launcher, "run_scientist", side_effect=error
             ), patch.object(launcher, "cleanup_child_processes") as cleanup:
                 if error is None:

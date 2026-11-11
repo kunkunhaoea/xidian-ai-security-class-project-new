@@ -2,6 +2,7 @@ import json
 import os
 import re
 from typing import Any
+from ai_scientist.model_provider import DEEPSEEK_MODELS, llm_provider
 from ai_scientist.utils.token_tracker import track_token_usage
 
 import anthropic
@@ -10,7 +11,6 @@ import openai
 
 MAX_NUM_TOKENS = 4096
 
-DEEPSEEK_MODELS = ("deepseek-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash")
 
 AVAILABLE_LLMS = [
     *DEEPSEEK_MODELS,
@@ -490,35 +490,33 @@ def extract_json_between_markers(llm_output: str) -> dict | None:
 
 
 def create_client(model) -> tuple[Any, str]:
-    if model in DEEPSEEK_MODELS:
+    provider = llm_provider(model)
+    if provider == "deepseek_compatible":
         return openai.OpenAI(
             api_key=os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY"),
             base_url=os.getenv("OPENAI_BASE_URL") or "https://api.deepseek.com",
         ), model
-    if model.startswith("claude-"):
+    if provider == "anthropic":
         print(f"Using Anthropic API with model {model}.")
         return anthropic.Anthropic(), model
-    elif model.startswith("bedrock") and "claude" in model:
+    elif provider == "bedrock":
         client_model = model.split("/")[-1]
         print(f"Using Amazon Bedrock with model {client_model}.")
         return anthropic.AnthropicBedrock(), client_model
-    elif model.startswith("vertex_ai") and "claude" in model:
+    elif provider == "vertex":
         client_model = model.split("/")[-1]
         print(f"Using Vertex AI with model {client_model}.")
         return anthropic.AnthropicVertex(), client_model
-    elif model.startswith("ollama/"):
+    elif provider == "ollama":
         print(f"Using Ollama with model {model}.")
         return openai.OpenAI(
             api_key=os.environ.get("OLLAMA_API_KEY", ""),
             base_url="http://localhost:11434/v1",
         ), model
-    elif "gpt" in model:
+    elif provider == "openai":
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
-    elif "o1" in model or "o3" in model:
-        print(f"Using OpenAI API with model {model}.")
-        return openai.OpenAI(), model
-    elif model == "deepseek-coder-v2-0724":
+    elif provider == "deepseek":
         print(f"Using OpenAI API with {model}.")
         return (
             openai.OpenAI(
@@ -527,7 +525,7 @@ def create_client(model) -> tuple[Any, str]:
             ),
             model,
         )
-    elif model == "deepcoder-14b":
+    elif provider == "huggingface":
         print(f"Using HuggingFace API with {model}.")
         # Using OpenAI client with HuggingFace API
         if "HUGGINGFACE_API_KEY" not in os.environ:
@@ -539,7 +537,7 @@ def create_client(model) -> tuple[Any, str]:
             ),
             model,
         )
-    elif model == "llama3.1-405b":
+    elif provider == "openrouter":
         print(f"Using OpenAI API with {model}.")
         return (
             openai.OpenAI(
@@ -548,7 +546,7 @@ def create_client(model) -> tuple[Any, str]:
             ),
             "meta-llama/llama-3.1-405b-instruct",
         )
-    elif 'gemini' in model:
+    elif provider == "gemini":
         print(f"Using OpenAI API with {model}.")
         return (
             openai.OpenAI(

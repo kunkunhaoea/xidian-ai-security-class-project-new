@@ -60,6 +60,19 @@ python ai_scientist/perform_ideation_temp_free.py \
 
 先审阅 `bfts_config.yaml` 中的并行数、各阶段迭代次数、执行超时和模型设置。`agent.stages` 各阶段上限可能覆盖通用 `steps`，不能只修改 `steps` 就认为已限制总量。
 
+正式运行前，可以用相同参数加上 `--preflight`，一次检查想法 JSON、配置字段、输出目录写权限、启用阶段的模型凭据和本机工具。可用 `--config` 指定其他 YAML，启动检查和正式运行都读取该文件。
+
+```bash
+python launch_scientist_bfts.py --preflight \
+  --config bfts_config.yaml \
+  --load_ideas ai_scientist/ideas/course_topic.json \
+  --idea_idx 0 \
+  --skip_writeup \
+  --skip_review
+```
+
+检查只运行本机探测，退出码 `0` 表示本机检查通过，`1` 表示有错误。缺少 CUDA 会提示 CPU 回退，PyTorch 无法导入则报错。`--skip_writeup` 会略过论文生成和审阅所需的模型及工具检查，实验与图表汇总的检查仍会执行。模型权限和远程服务可用性需通过实际运行确认。详见 [启动检查开发日志](log/2026-11-11-preflight.md)。
+
 先跳过论文生成和审阅，运行第一个想法：
 
 ```bash

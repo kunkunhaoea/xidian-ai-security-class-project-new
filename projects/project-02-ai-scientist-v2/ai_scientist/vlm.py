@@ -4,6 +4,8 @@ import re
 import json
 import backoff
 import openai
+
+from ai_scientist.model_provider import vision_provider
 import os
 from PIL import Image
 from ai_scientist.utils.token_tracker import track_token_usage
@@ -194,16 +196,11 @@ def get_response_from_vlm(
 
 def create_client(model: str) -> tuple[Any, str]:
     """Create client for vision-language model."""
-    if model in [
-        "gpt-4o-2024-05-13",
-        "gpt-4o-2024-08-06",
-        "gpt-4o-2024-11-20",
-        "gpt-4o-mini-2024-07-18",
-        "o3-mini",
-    ]:
+    provider = vision_provider(model)
+    if provider == "openai":
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
-    elif model.startswith("ollama/"):
+    elif provider == "ollama":
         print(f"Using Ollama API with model {model}.")
         return openai.OpenAI(
             api_key=os.environ.get("OLLAMA_API_KEY", ""),
