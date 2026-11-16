@@ -663,10 +663,11 @@ def download_from_pdf_link(env: BrowserEnv, pdf_link: str, save_name: str):
         cookies = get_all_cookies()
         cookies_dict = {}
 
-        proxies = {
-            'http': 'http://127.0.0.1:7890',  # 根据你的代理端口修改
-            'https': 'http://127.0.0.1:7890'  # 根据你的代理端口修改
-        }
+        # Proxy and TLS verification are configurable rather than hardcoded.
+        # Default: respect ambient HTTP(S)_PROXY env (proxies=None) and verify TLS.
+        proxy_url = os.getenv("PDF_DOWNLOAD_PROXY", "").strip()
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        verify_ssl = os.getenv("PDF_DOWNLOAD_VERIFY_SSL", "1").strip().lower() not in ("0", "false", "no", "off")
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -676,7 +677,7 @@ def download_from_pdf_link(env: BrowserEnv, pdf_link: str, save_name: str):
             cookies_dict[cookie['name']] = cookie['value']
         response = requests.get(pdf_link, stream=True, headers=headers,
             cookies=cookies_dict,
-            allow_redirects=True, proxies=proxies,verify=False,)
+            allow_redirects=True, proxies=proxies, verify=verify_ssl,)
         content_type = response.headers.get('Content-Type', '')
         print(f"Content-Type: {content_type}")
 
@@ -702,7 +703,7 @@ def download_from_pdf_link(env: BrowserEnv, pdf_link: str, save_name: str):
                     headers=headers,
                     cookies=cookies_dict,
                     proxies=proxies,
-                    verify=False,
+                    verify=verify_ssl,
                     stream=True
                 )
                 pdf_content = pdf_response.content

@@ -68,8 +68,16 @@ class _CustomMarkdownify(markdownify.MarkdownConverter):
 
         return super().convert_hn(n, el, text, convert_as_inline)  # type: ignore
 
-    def convert_a(self, el: Any, text: str, convert_as_inline: bool):
-        """Same as usual converter, but removes Javascript links and escapes URIs."""
+    def convert_a(self, el: Any, text: str, convert_as_inline: bool = False, parent_tags: Any = None, **kwargs: Any):
+        """Same as usual converter, but removes Javascript links and escapes URIs.
+
+        修复（2026-11-04）：已安装的 markdownify 1.2.3 用
+        `convert_fn(node, text, parent_tags=parent_tags)` 调用转换器，
+        而原来的签名是 `(el, text, convert_as_inline)`，于是任何带 <a> 的网页都抛
+        `TypeError: convert_a() got an unexpected keyword argument 'parent_tags'`，
+        整页 HTML 转 Markdown 失败（实测一次运行里报 3 次，网页浏览这条腿是断的）。
+        这里同时接受新旧两种协议。
+        """
         prefix, suffix, text = markdownify.chomp(text)  # type: ignore
         if not text:
             return ""
@@ -100,8 +108,12 @@ class _CustomMarkdownify(markdownify.MarkdownConverter):
         title_part = ' "%s"' % title.replace('"', r"\"") if title else ""
         return "%s[%s](%s%s)%s" % (prefix, text, href, title_part, suffix) if href else text
 
-    def convert_img(self, el: Any, text: str, convert_as_inline: bool) -> str:
-        """Same as usual converter, but removes data URIs"""
+    def convert_img(self, el: Any, text: str, convert_as_inline: bool = False, parent_tags: Any = None, **kwargs: Any) -> str:
+        """Same as usual converter, but removes data URIs
+
+        修复（2026-11-04）：同 convert_a，markdownify 1.2.3 以
+        `parent_tags=` 关键字调用转换器，旧签名会直接 TypeError。
+        """
 
         alt = el.attrs.get("alt", None) or ""
         src = el.attrs.get("src", None) or ""

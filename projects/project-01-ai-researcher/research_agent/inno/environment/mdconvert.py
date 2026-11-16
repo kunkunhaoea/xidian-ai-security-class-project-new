@@ -78,8 +78,15 @@ def _get_page_markdown():
 
             return super().convert_hn(n, el, text, convert_as_inline)  # type: ignore
 
-        def convert_a(self, el: Any, text: str, convert_as_inline: bool):
-            """Same as usual converter, but removes Javascript links and escapes URIs."""
+        def convert_a(self, el: Any, text: str, convert_as_inline: bool = False, parent_tags: Any = None, **kwargs: Any):
+            """Same as usual converter, but removes Javascript links and escapes URIs.
+
+            修复（2026-11-10）：已安装的 markdownify 1.2.3 用
+            `convert_fn(node, text, parent_tags=parent_tags)` 调用转换器，旧签名
+            `(el, text, convert_as_inline)` 会抛 TypeError，整页 HTML 转 Markdown 失败。
+            此副本经 `browser_env._get_page_markdown` 用于 **web 浏览**（与修复 11 修的
+            markdown_browser/mdconvert.py 本地文件副本是两份代码），保持同样的新旧协议兼容。
+            """
             prefix, suffix, text = markdownify.chomp(text)  # type: ignore
             if not text:
                 return ""
@@ -110,8 +117,11 @@ def _get_page_markdown():
             title_part = ' "%s"' % title.replace('"', r"\"") if title else ""
             return "%s[%s](%s%s)%s" % (prefix, text, href, title_part, suffix) if href else text
 
-        def convert_img(self, el: Any, text: str, convert_as_inline: bool) -> str:
-            """Same as usual converter, but removes data URIs"""
+        def convert_img(self, el: Any, text: str, convert_as_inline: bool = False, parent_tags: Any = None, **kwargs: Any) -> str:
+            """Same as usual converter, but removes data URIs
+
+            修复（2026-11-10）：同 convert_a，接受 markdownify 1.2.3 的 parent_tags= 调用。
+            """
 
             alt = el.attrs.get("alt", None) or ""
             src = el.attrs.get("src", None) or ""

@@ -118,7 +118,13 @@ def process_terminal_response(func):
                 os.makedirs(tmp_dir, exist_ok=True)
                 tmp_file = os.path.join(os.getcwd(), "terminal_tmp", "terminal_output_{}___{}.txt".format(datetime.now().strftime("%Y%m%d_%H%M%S"), func.__name__))
                 
-                with open(tmp_file, "w") as f:
+                # 修复（2026-11-04）：原来用 open(tmp_file, "w") 按平台默认编码写，
+                # 中文 Windows 上是 cp936/GBK，而后面 open_local_terminal_output 经
+                # 文本浏览器按 utf-8 严格读，于是任何含非 ASCII 字符的文件（实测
+                # /workplace/VQGAN-pytorch/vqgan.py）都报
+                # "'utf-8' codec can't decode byte 0xa6"，模型看不到内容就反复重试
+                # 同一个 read_file —— 单次运行里这一个文件被重复读了 274 次。
+                with open(tmp_file, "w", encoding="utf-8", errors="replace") as f:
                     f.write(res_output)
                 return open_local_terminal_output(tmp_file)
             except Exception as e:
@@ -143,8 +149,19 @@ def read_file(file_path: str, env: DockerEnv) -> str:
     try:
         command = f"cat {file_path}"
         response = env.run_command(command) # status, result
-        # res_output = truncate_by_tokens(env, response['result'], 10000)
-        # return f"Exit code: {response['status']} \nOutput: \n{res_output}"
+        # 修复（2026-11-04）：文件不存在时，顺手把同级目录列出来一起返回。
+        # 否则模型会照着 benchmark metaprompt 里写的路径反复重试同一个不存在的文件
+        # （实测对 /workplace/dataset_candidate/edm/README.md 重复调用 44 次）。
+        if isinstance(response, dict) and response.get("status") != 0 and "No such file" in str(response.get("result", "")):
+            parent = os.path.dirname(str(file_path).rstrip("/")) or "/"
+            listing = env.run_command(f"ls -la {parent}")
+            if isinstance(listing, dict) and listing.get("status") == 0:
+                response = dict(response)
+                response["result"] = (
+                    str(response.get("result", ""))
+                    + f"\n[Hint] `{file_path}` does not exist. Actual contents of `{parent}`:\n"
+                    + str(listing.get("result", ""))[:2000]
+                )
         return response
     except FileNotFoundError:
         return f"Error in reading file: {file_path}"
@@ -276,9 +293,6 @@ def execute_command(command: str, env: DockerEnv) -> str:
     except Exception as e:
         return f"Error running command: {str(e)}"
 
-def print_stream(text):
-    console = Console()
-    console.print(f"[grey42]{text}[/grey42]")
 def set_doc(doc_template):
     def decorator(func):
         func.__doc__ = doc_template

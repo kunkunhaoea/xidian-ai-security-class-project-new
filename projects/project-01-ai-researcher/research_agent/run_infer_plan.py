@@ -28,6 +28,39 @@ from research_agent.inno.environment.utils import setup_dataset
 # task_level = "task1"
 def warp_source_papers(source_papers):
     return "\n".join([f"Title: {source_paper['reference']}; You can use this paper in the following way: {source_paper['usage']}" for source_paper in source_papers])
+
+# 冒烟测试开关（2026-11-10）：设 AI_RESEARCHER_SMOKE=1 时，用本地合成 toy 数据 + CPU
+# 把整条 Agent 链（Prepare→Survey→CodingPlan→ML→Judge→Submit→ExpAnalyser）端到端跑通，
+# 只验证链路连通与工具执行，不做真实复现、不下载真实数据集。未设开关时下列函数原样返回，
+# 正常评测流程完全不受影响。
+def _smoke_mode() -> bool:
+    return os.environ.get("AI_RESEARCHER_SMOKE", "0") == "1"
+
+def _smoke_relax(text: str) -> str:
+    if not _smoke_mode():
+        return text
+    repl = [
+        ("NO toy or random datasets", "USE the provided TOY synthetic dataset (smoke test: synthetic data is expected)"),
+        ("MUST use actual dataset (no toy data, download according to the reference codebases) [IMPORTANT!!!]", "USE the local TOY synthetic dataset; DO NOT download anything (smoke test) [IMPORTANT!!!]"),
+        ("MUST use actual dataset (no toy data)", "USE the local toy synthetic dataset (no download)"),
+        ("Select and download ONE actual dataset from references", "Generate a small synthetic TOY dataset locally with numpy (NO download)"),
+        ("the ACTUAL dataset on the GPU device", "the TOY synthetic dataset on the CPU device"),
+        ("with APPROPRIATE epochs of training and testing on THIS ACTUAL dataset", "with 2 epochs on the toy dataset"),
+        ("You must MODIFY the epochs in the script `run_training_testing.py` rather than use the 2 epochs.", "For this smoke test keep the epochs small (2); do NOT increase them."),
+        ("ACTUAL dataset", "toy dataset"),
+        ("actual dataset", "toy dataset"),
+        ("ACTUAL results", "toy results"),
+        ("on the GPU device", "on the CPU device"),
+        ("train on GPU device", "train on CPU device"),
+        ("trained on GPU device", "trained on CPU device"),
+        ("GPU device", "CPU device"),
+        ("download the dataset from the reference codebases", "use the local toy dataset (no download)"),
+        ("Dataset downloads and loads correctly", "Toy dataset is generated and loads correctly"),
+        ("GPU support is implemented", "CPU execution is implemented"),
+    ]
+    for a, b in repl:
+        text = text.replace(a, b)
+    return text
 def extract_json_from_output(output_text: str) -> dict:
     # 计数器方法来找到完整的JSON
     def find_json_boundaries(text):
@@ -136,8 +169,20 @@ Your task is to choose at least 5 repositories as the reference codebases.
         messages = [{"role": "user", "content": query}]
         prepare_messages, context_variables = await self.prepare_agent(messages, context_variables)
         prepare_res = prepare_messages[-1]["content"]
-        prepare_dict = extract_json_from_output(prepare_res)
-        paper_list = prepare_dict["reference_papers"]
+        # 优化 P0（2026-11-10）：优先用 Prepare Agent 经 case_resolved 写入的结构化
+        # prepare_result（含 reference_papers 列表），比解析自由文本更可靠；自由文本 JSON
+        # 仅作回退。两者都拿不到时给明确错误，而非裸 KeyError。
+        prepare_result = context_variables.get("prepare_result") or {}
+        paper_list = prepare_result.get("reference_papers")
+        if not paper_list:
+            prepare_dict = extract_json_from_output(prepare_res)
+            paper_list = prepare_dict.get("reference_papers")
+        if not paper_list:
+            raise ValueError(
+                "Prepare Agent did not produce a valid 'reference_papers' list "
+                "(neither structured prepare_result nor parseable JSON output). "
+                "Cannot proceed to download reference papers."
+            )
         download_res = self.download_papaer({"paper_list": paper_list, "local_root": local_root, "workplace_name": workplace_name})
         survey_query = f"""\
 I have an innovative ideas related to machine learning:
@@ -176,6 +221,14 @@ And the evaluation metrics are:
 {data_module.EVALUATION}
 
 {data_module.REF}
+"""
+        if _smoke_mode():
+            dataset_description = """\
+[SMOKE TEST MODE] This is an end-to-end pipeline smoke test, NOT a real reproduction.
+Use a small TOY synthetic dataset generated locally with numpy/torch (e.g. 256 random
+32x32 images or a tiny synthetic signal). DO NOT download any real dataset (no CIFAR-10,
+no network downloads). Train on CPU. The goal is only to verify the whole agent chain
+runs through; tiny scale and synthetic data are expected and correct.
 """
 
         plan_query = f"""\
@@ -315,6 +368,40 @@ Remember:
 - Project MUST run end-to-end without placeholders
 - MUST complete 2 epochs of training and testing
 """
+        if _smoke_mode():
+            ml_dev_query = f"""\
+[SMOKE TEST MODE — end-to-end pipeline verification, NOT a real experiment]
+Innovative idea (context only): {ideas}
+Reference codebases (context only): {prepare_res[:1500]}
+Model survey notes (context only): {survey_res[:1500]}
+
+Your task: build a MINIMAL but COMPLETE toy project that exercises the full pipeline,
+using a small SYNTHETIC dataset generated locally (NO downloads, NO real dataset, CPU only).
+
+Requirements:
+1. Generate a tiny synthetic dataset yourself with numpy/torch and save it under
+   `/{workplace_name}/project/data/` (e.g. 256 random 32x32x3 float images in [0,1],
+   saved as toy_data.npz). DO NOT download CIFAR-10 or anything from the network.
+2. Implement a small vector-quantization model (a tiny VQ-VAE-style autoencoder with a
+   codebook and straight-through estimator) under `/{workplace_name}/project/model/`.
+   Keep it small (a few conv/linear layers). No placeholder code.
+3. Implement training under `/{workplace_name}/project/training/` and testing under
+   `/{workplace_name}/project/testing/` (a simple reconstruction MSE metric is enough).
+4. Create `/{workplace_name}/project/run_training_testing.py` that loads the toy data,
+   trains EXACTLY 2 epochs on CPU (tiny batch, e.g. 32), then tests and logs a metric.
+5. RUN `run_training_testing.py` to completion on CPU and confirm it prints 2 epochs of
+   training plus a test metric. Keep everything tiny so it finishes in seconds.
+
+Remember:
+- This is a SMOKE TEST: synthetic toy data + CPU + tiny scale are REQUIRED and correct.
+- DO NOT download any dataset. DO NOT use GPU. DO NOT attempt a real reproduction.
+- The project MUST run end-to-end without placeholders and complete 2 epochs + testing.
+- SPEED MATTERS MORE THAN THOROUGHNESS. Do NOT run hyperparameter sweeps, ablation
+  studies, variant comparisons, or repeated experiments. Do NOT keep refining once it
+  works. A simple project already exists or can be written quickly — reuse/finish it,
+  run `run_training_testing.py` ONCE (2 epochs), confirm it prints a test metric, then
+  STOP and return your final answer immediately. Aim to finish in as few steps as possible.
+"""
         messages = [{"role": "user", "content": ml_dev_query}]
         ml_dev_messages, context_variables = await self.ml_agent(messages, context_variables)
         ml_dev_res = ml_dev_messages[-1]["content"]
@@ -340,6 +427,7 @@ Your task is to evaluate the implementation, and give a suggestion about the imp
 2. The implementation should have the test process. All in all, you should train ONE dataset with TWO epochs, and finally test the model on the test dataset within one script. The test metrics should follow the plan.
 3. The model should be train on GPU device. If you meet Out of Memory problem, you should try another specific GPU device.
 """
+        query = _smoke_relax(query)
         input_messages = [{
             "role": "user",
             "content": query
@@ -423,11 +511,12 @@ Your task is to submit the code to the environment by running the script `run_tr
 Note that if your last implementation is not runable, you should finalize the submission with `case_not_resolved` function. But you can temporarily ignore the judgement of the `Judge Agent` which contains the suggestions about the implementation.
 After you get the result, you should return the result with your analysis and suggestions about the implementation with `case_resolved` function.
 """
+        ml_submit_query = _smoke_relax(ml_submit_query)
         judge_messages.append({"role": "user", "content": ml_submit_query})
         judge_messages, context_variables = await self.ml_agent(judge_messages, context_variables, iter_times="submit")
         submit_res = judge_messages[-1]["content"]
 
-        EXP_ITER_TIMES = 2
+        EXP_ITER_TIMES = 1 if _smoke_mode() else 2
         for i in range(EXP_ITER_TIMES):
             exp_planner_query = f"""\
 You are given an innovative idea:
@@ -446,6 +535,23 @@ Your task is to:
     - Visualize the experimental results and give a detailed analysis report about the results.
     - ANY other experiments that exsiting concurrent reference papers and codebases have done.
 DO NOT use the `case_resolved` function before you have carefully and comprehensively analyzed the experimental results and the reference codebases and papers.
+"""
+            if _smoke_mode():
+                exp_planner_query = f"""\
+[SMOKE TEST MODE — end-to-end pipeline verification, NOT a real experiment]
+Innovative idea (context only): {ideas}
+Experimental results from the toy run (context only): {submit_res[:1500]}
+
+Your task: this is a connectivity smoke test on a tiny synthetic toy dataset (CPU).
+1. Briefly analyze the toy experimental results (a short paragraph is enough).
+2. Give a MINIMAL further_plan for the Machine Learning Agent. Because this is only a
+   smoke test, the further_plan must contain EXACTLY ONE trivial verification step:
+   re-run the existing `run_training_testing.py` ONCE on the toy data (2 epochs, CPU)
+   and confirm it prints a test metric. DO NOT propose ablation studies, sensitivity
+   analysis, hyperparameter sweeps, visualizations, new datasets, or any real experiment.
+3. Then call `case_resolved` promptly with your short analysis_report and this minimal
+   further_plan. Do NOT over-explore the reference codebases; a quick glance is enough.
+SPEED MATTERS MORE THAN THOROUGHNESS. Finish in as few steps as possible.
 """
             judge_messages.append({"role": "user", "content": exp_planner_query})
             judge_messages, context_variables = await self.exp_analyser(judge_messages, context_variables, iter_times=f"refine_{i+1}")
@@ -468,6 +574,25 @@ And a detailed analysis report about the results are given by the `Experiment Pl
 Your task is to refine the experimental results according to the analysis report by modifying existing code in the directory `/{workplace_name}/project`. You should NOT stop util every experiment is done with ACTUAL results. If you encounter Out of Memory problem, you should try another specific GPU device. If you encounter ANY other problems, you should try your best to solve the problem by yourself.
 
 Note that you should fully utilize the existing code in the directory `/{workplace_name}/project` as much as possible. If you want to add more experiments, you should add the python script in the directory `/{workplace_name}/project/`, like `run_training_testing.py`. Select and output the important results during the experiments into the log files, do NOT output them all in the terminal.
+"""
+            refine_query = _smoke_relax(refine_query)
+            if _smoke_mode():
+                refine_query = f"""\
+[SMOKE TEST MODE — end-to-end pipeline verification, NOT a real experiment]
+Innovative idea (context only): {ideas}
+Analysis report (context only): {analysis_report[:1500]}
+
+Your task: this is a connectivity smoke test on a tiny synthetic toy dataset (CPU).
+The existing toy project is under `/{workplace_name}/project`. Do the MINIMAL verification:
+re-run `run_training_testing.py` ONCE on the toy data (2 epochs, CPU), confirm it prints
+a test metric, then STOP and return your final answer immediately with `case_resolved`.
+
+Remember:
+- This is a SMOKE TEST: synthetic toy data + CPU + tiny scale are REQUIRED and correct.
+- DO NOT download any dataset. DO NOT use GPU. DO NOT run ablation studies, hyperparameter
+  sweeps, variant comparisons, or repeated experiments. DO NOT keep refining once it works.
+- SPEED MATTERS MORE THAN THOROUGHNESS. Run ONCE, confirm a metric, then STOP. Aim to
+  finish in as few steps as possible.
 """
             judge_messages.append({"role": "user", "content": refine_query})
             judge_messages, context_variables = await self.ml_agent(judge_messages, context_variables, iter_times=f"refine_{i+1}")

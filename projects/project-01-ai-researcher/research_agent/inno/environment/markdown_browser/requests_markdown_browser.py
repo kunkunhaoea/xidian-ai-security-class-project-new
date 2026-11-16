@@ -11,6 +11,7 @@ import traceback
 import uuid
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import unquote, urljoin, urlparse
+from urllib.request import url2pathname
 
 import pathvalidate
 import requests
@@ -20,6 +21,25 @@ from .markdown_search import AbstractMarkdownSearch, BingMarkdownSearch
 
 # TODO: Fix unfollowed import
 from .mdconvert import FileConversionException, MarkdownConverter, UnsupportedFormatException  # type: ignore
+
+# 纯文本类后缀：markitdown 不识别，但研究代理需要读到原文（论文 TeX 源码、
+# 训练日志、脚本等），因此统一按 .txt 转换而不是落到“下载”分支。
+_PLAIN_TEXT_SUFFIXES = frozenset(
+    {
+        ".tex", ".bib", ".bbl", ".cls", ".sty", ".aux", ".log", ".out", ".txt",
+        ".py", ".sh", ".cfg", ".ini", ".toml", ".yaml", ".yml",
+        ".c", ".h", ".cpp", ".hpp", ".m", ".ml", ".java", ".js", ".ts",
+    }
+)
+
+# 转换器失败时不要把二进制内容当文本灌进上下文（一次就是几十 KB 的垃圾 token）
+_BINARY_SUFFIXES = frozenset(
+    {
+        ".npz", ".npy", ".pt", ".pth", ".ckpt", ".bin", ".safetensors", ".pkl", ".pickle",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".mp4", ".avi", ".wav", ".mp3",
+        ".zip", ".gz", ".tar", ".tgz", ".bz2", ".7z", ".rar", ".so", ".dll", ".exe", ".whl",
+    }
+)
 from research_agent.inno.memory.paper_memory import PaperMemory
 from research_agent.constant import API_BASE_URL
 def normalize_collection_name(name: str) -> str:
@@ -139,6 +159,14 @@ class RequestsMarkdownBrowser(AbstractMarkdownBrowser):
         local_path = path.replace(self.docker_workplace, self.local_workplace)
         return local_path
     def _convert_local_to_docker(self, path: str) -> str:
+        # 修复（2026-11-04，Windows）：读本地文件后 self.address 仍是 `file:///D:/...`
+        # 这种 URI，而 local_workplace 是 `D:\...\workplace\workplace`；直接对它做子串
+        # 断言必定失败（Linux 上 URI 和本地路径分隔符一致才侥幸通过），导致
+        # _get_browser_state 每次报“路径必须是从 workplace 目录出发的绝对路径”。
+        # 先归一成本地规范路径，再保留原来的越界检查。
+        if path.startswith("file://"):
+            path = url2pathname(urlparse(path).path)
+        path = os.path.abspath(os.path.normpath(path))
         assert self.local_workplace in path, f"The path must be a absolute path from `{self.local_workplace}/` directory"
         docker_path = path.replace(self.local_workplace, self.docker_workplace)
         return docker_path
@@ -299,6 +327,22 @@ class RequestsMarkdownBrowser(AbstractMarkdownBrowser):
         self.set_address(path_or_uri)
         return self.viewport
 
+    def _set_local_text_page(self, path: str, note: str = "") -> None:
+        """把本地文件按有损文本读入当前页面（2026-11-04 新增）。
+
+        代理要读的东西（论文 TeX、训练日志、终端输出临时文件、脚本）基本都是纯文本，
+        但可能夹带非 UTF-8 字节；严格解码会让整次读取失败，模型只看到一句报错，
+        于是反复重试同一个调用（实测单个文件被重复读 274 次）。这里统一用
+        errors="replace"，保证“总能拿到内容”，把可恢复问题挡在工具层。
+        """
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError as exc:
+            text = f"[cannot read `{path}`: {type(exc).__name__}: {exc}]"
+        self.page_title = os.path.basename(path)
+        self._set_page_content((note + "\n" if note else "") + text)
+
     def open_local_file(self, local_path: str) -> str:
         """Convert a local file path to a file:/// URI, update the address, visit the page, and return the contents of the viewport."""
         full_path = os.path.abspath(os.path.expanduser(local_path))
@@ -342,7 +386,16 @@ class RequestsMarkdownBrowser(AbstractMarkdownBrowser):
         # print(url)
         try:
             if url.startswith("file://"):
-                download_path = os.path.normcase(os.path.normpath(unquote(url[7:])))
+                # 修复（2026-11-04，Windows）：open_local_file 用 pathlib.Path.as_uri()
+                # 生成 `file:///D:/...`，原来的 `url[7:]` 得到 `/D:/...`，再 normcase/normpath
+                # 变成 `\d:\...`（前导反斜杠 + 小写盘符），os.path.isfile 判为 False，
+                # puremagic 于是抛 PureError("Not a regular file")，导致模型读不到任何
+                # 本地 tex/结果文件并在工具循环里反复重试。url2pathname 是标准库里的
+                # 跨平台 file URI -> 本地路径转换（POSIX 下仍返回 /home/... 形式）。
+                # 注意不要再套 normcase：Windows 上它会把盘符转成小写，而第 143 行的
+                # `self.local_workplace in path` 是大小写敏感的子串断言，小写盘符会让
+                # 合法路径被误判成“必须是从 workplace 目录出发的绝对路径”。
+                download_path = os.path.normpath(url2pathname(urlparse(url).path))
                 if os.path.isdir(download_path):  # TODO: Fix markdown_converter types
                     res = self._markdown_converter.convert_stream(  # type: ignore
                         io.StringIO(self._fetch_local_dir(download_path)), file_extension=".html"
@@ -352,9 +405,42 @@ class RequestsMarkdownBrowser(AbstractMarkdownBrowser):
                         res.text_content, split_pages=False
                     )  # Like search results, don't split directory listings
                 else:
-                    res = self._markdown_converter.convert_local(download_path)
-                    self.page_title = res.title
-                    self._set_page_content(res.text_content)
+                    # 修复（2026-11-04）：本地文件读取必须“永不硬失败”。
+                    # 原来两类问题都会让代理空转重试：
+                    #   1) `.tex` 等纯文本 markitdown 不支持，抛 UnsupportedFormatException
+                    #      后被上层当成“下载”，页面只剩 `# Download complete / Saved file to ...`，
+                    #      代理读不到论文正文（一轮 Paper Survey 重复报错 274 次）；
+                    #   2) 文件里有非 UTF-8 字节时严格解码直接抛 UnicodeDecodeError
+                    #      （实测 vqgan.py 触发 0xA6，同一个 read_file 被重复调用 274 次）。
+                    # 现在：已知纯文本后缀走有损直读；其余先交给转换器，失败再兜底直读；
+                    # 二进制后缀只回一行说明，避免把垃圾字节灌进上下文。
+                    suffix = os.path.splitext(download_path)[1].lower()
+                    if suffix in _BINARY_SUFFIXES:
+                        # 转换器对二进制文件不会报错，而是返回
+                        # "# Download complete / Saved file to ..." 这种存根，
+                        # 模型看到既没有内容也没有错误，只会反复重试；
+                        # 这里直接给一行明确说明并劝停。
+                        self.page_title = os.path.basename(download_path)
+                        self._set_page_content(
+                            f"[binary file `{os.path.basename(download_path)}` "
+                            f"({os.path.getsize(download_path)} bytes) cannot be shown as text. "
+                            "Do not retry reading it; inspect it with a command instead "
+                            "(e.g. `ls -l`, `file`, or a short python snippet that loads it).]"
+                        )
+                    elif suffix in _PLAIN_TEXT_SUFFIXES:
+                        self._set_local_text_page(download_path)
+                    else:
+                        try:
+                            res = self._markdown_converter.convert_local(download_path)
+                            text = res.text_content or ""
+                            if text.lstrip().startswith("# Download complete"):
+                                # 转换器把它当成下载处理了：换成有损文本，别给模型一个空存根
+                                self._set_local_text_page(download_path, note="[converter treated this as a download; showing raw text]")
+                            else:
+                                self.page_title = res.title
+                                self._set_page_content(text)
+                        except Exception as exc:  # UnsupportedFormat / UnicodeDecode / FileConversion ...
+                            self._set_local_text_page(download_path, note=f"[lossy text fallback after {type(exc).__name__}]")
             else:
                 # Send a HTTP request to the URL
                 if session is None:

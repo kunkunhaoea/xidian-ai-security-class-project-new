@@ -20,7 +20,10 @@ def str_to_bool(value):
         return True
     if value in false_values:
         return False
-    return True  # default return True
+    # 优化 P1（2026-11-10）：无法识别的值原来默认 True（如 DEBUG=maybe→True），
+    # 改为告警并 fail-safe 返回 False，避免误开调试/评测等开关。
+    print(f"[str_to_bool] Unrecognized boolean value {value!r}; defaulting to False.")
+    return False
 
 
 DOCKER_WORKPLACE_NAME = os.getenv('DOCKER_WORKPLACE_NAME', 'workplace_meta')
@@ -44,6 +47,11 @@ CHEEP_MODEL = os.getenv('CHEEP_MODEL', "gpt-4o-mini-2024-07-18")
 
 # GPUS = os.getenv('GPUS', "all")
 GPUS = os.getenv('GPUS', None)
+# 优化 P1（2026-11-10）：dotenv 把 GPUS=None 读成字符串 'None'（真值），会让
+# docker_env 拼出非法的 `docker run --gpus None`。这里把 'None'/'null'/'' 等归一为
+# None（真正禁用 GPU）；禁用 GPU 的推荐写法仍是 .env 里 GPUS=（空）。
+if isinstance(GPUS, str) and GPUS.strip().lower() in ("none", "null", "false", "0", ""):
+    GPUS = None
 
 FN_CALL = str_to_bool(os.getenv('FN_CALL', True))
 API_BASE_URL = os.getenv('API_BASE_URL', None)

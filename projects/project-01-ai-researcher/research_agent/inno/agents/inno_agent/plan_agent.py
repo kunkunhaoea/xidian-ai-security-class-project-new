@@ -1,5 +1,5 @@
 from research_agent.inno.types import Agent
-from research_agent.inno.tools import gen_code_tree_structure, read_file, plan_dataset, plan_model, plan_training, plan_testing, terminal_page_down, terminal_page_up, terminal_page_to
+from research_agent.inno.tools import gen_code_tree_structure, read_file, plan_dataset, plan_training, plan_testing, terminal_page_down, terminal_page_up, terminal_page_to
 from research_agent.inno.util import make_message, make_tool_message
 from research_agent.inno.registry import register_agent
 from research_agent.inno.environment.docker_env import DockerEnv, with_env
@@ -100,19 +100,6 @@ Your goal is to create a comprehensive, practical, and implementable plan that b
     model=model,
     instructions=instructions,
     functions=tools, 
-    tool_choice = "required", 
+    tool_choice = "required",
     parallel_tool_calls = False
     )
-
-f"""You are a Machine Learning Expert, who can help me plan the detailed coding plan of the project based on the user's innovative idea in the field of machine learning.
-
-      You are given the user's innovative idea, some reference codebases selected by the `Prepare Agent` in the directory: `/`, and comprehensive notes explored by the `Survey Agent`. 
-
-      I want to implement the innovative idea with the information from the reference codebases and notes. 
-
-      Please carefully review the reference codebases, and plan the detailed coding plan for me. Note that you should use the function `gen_code_tree_structure` and `read_file` to go through and read the code in the reference codebases, and after carefully reviewing the existing resources and understand the task, use the function `plan_dataset`, `plan_training`, and `plan_testing` to plan the dataset, training, and testing process. Note that the notes by the `Survey Agent` could be regarded as the plan of the model.
-
-      [IMPORTANT] Every plan should be generated only after you have carefully reviewed the existing resources and understand the task.
-
-      [IMPORTANT] Testing process is always required for the project, inlcuding the test metrics, test dataset, and test code.
-      """

@@ -1,6 +1,7 @@
 import os
 import os.path as osp
 import subprocess
+import codecs
 from research_agent.constant import BASE_IMAGES, AI_USER, GITHUB_AI_TOKEN, GPUS, PLATFORM
 import time
 import socket
@@ -47,21 +48,21 @@ class DockerEnv:
             unzip_command = ["tar", "-xzvf", f"packages/{self.setup_package}.tar.gz", "-C", self.local_workplace]
             subprocess.run(unzip_command)
         if self.git_clone:
-            if not os.path.exists(os.path.join(self.local_workplace, 'metachain')):
-                git_command = ["cd", self.local_workplace, "&&", "git", "clone", "-b", self.test_pull_name, f"https://{AI_USER}:{GITHUB_AI_TOKEN}@github.com/tjb-tech/metachain.git"]
-                git_command = " ".join(git_command)
-                
-                result = subprocess.run(git_command, shell=True)
+            metachain_dir = os.path.join(self.local_workplace, 'metachain')
+            if not os.path.exists(metachain_dir):
+                clone_url = f"https://{AI_USER}:{GITHUB_AI_TOKEN}@github.com/tjb-tech/metachain.git"
+                # shell=False + explicit cwd: avoids shell injection via task/branch names
+                # and keeps the credential out of any shell string.
+                git_command = ["git", "clone", "-b", self.test_pull_name, clone_url, "metachain"]
+                result = subprocess.run(git_command, cwd=self.local_workplace, capture_output=True, text=True)
                 if result.returncode != 0:
                     raise Exception(f"Failed to clone the repository. Please check your internet connection and try again.")
                 # create a new branch
             new_branch_name = f"{self.test_pull_name}_{self.task_name}"
-            create_branch_command = f"cd {self.local_workplace}/metachain && git checkout -b {new_branch_name}"
-            result = subprocess.run(create_branch_command, shell=True, capture_output=True, text=True)
+            result = subprocess.run(["git", "checkout", "-b", new_branch_name], cwd=metachain_dir, capture_output=True, text=True)
             if result.returncode != 0:
-                print(Exception(f"Failed to create and switch to new branch. Error: {result.stderr}"))
-                switch_branch_command = f"cd {self.local_workplace}/metachain && git checkout {new_branch_name}"
-                result = subprocess.run(switch_branch_command, shell=True, capture_output=True, text=True)
+                print(f"Failed to create and switch to new branch. Error: {result.stderr}")
+                result = subprocess.run(["git", "checkout", new_branch_name], cwd=metachain_dir, capture_output=True, text=True)
                 if result.returncode != 0:
                     raise Exception(f"Failed to switch to new branch. Error: {result.stderr}")
                 else:
@@ -153,19 +154,50 @@ class DockerEnv:
         hostname = 'localhost'
         port = self.communication_port
         buffer_size = 4096
-        
+        # 优化 P1（2026-11-10）：长/静默命令曾在宿主机端 ~120s 触发 WinError 10060
+        # （根因未最终定位，嫌疑 Windows TCP 空闲重置）。这里启用 TCP keepalive 主动
+        # 保活以缓解空闲重置，并设一个宽松的可配接收空闲超时（默认 900s，env
+        # COMMAND_RECV_TIMEOUT 可调，<=0 表示不设），避免连接永久挂死。
+        # 注意：这是缓解措施而非根因修复；真实长命令仍建议容器内后台执行＋轮询日志。
+        recv_timeout = float(os.getenv("COMMAND_RECV_TIMEOUT", "900"))
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Linux：细调 keepalive 空闲/间隔/次数（常量缺失则跳过）
+            for opt, val in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 15), ("TCP_KEEPCNT", 8)):
+                if hasattr(socket, opt):
+                    try:
+                        s.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
+                    except OSError:
+                        pass
+            # Windows：用 SIO_KEEPALIVE_VALS 设 keepalive（开启, 空闲 60s, 间隔 15s，单位 ms）
+            if hasattr(s, "ioctl") and hasattr(socket, "SIO_KEEPALIVE_VALS"):
+                try:
+                    s.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 60000, 15000))
+                except OSError:
+                    pass
+            if recv_timeout > 0:
+                s.settimeout(recv_timeout)
             s.connect((hostname, port))
             s.sendall(command.encode())
-            
+            # 修复（2026-11-10）：发完命令后半关闭写端，给服务端一个明确的
+            # “命令结束”信号（EOF）。服务端 receive_all 相应改为读到 EOF 才停，
+            # 不再用“recv 不足 4096 就算结束”的不可靠启发式——后者会把
+            # create_file/write_file 的 ~100KB base64 命令从中间截断，bash 收到
+            # 未闭合引号报 unexpected EOF，ML Agent 反复重写同一文件形成死循环。
+            # 半关闭只关写端，下面仍能正常读取服务端响应。
+            s.shutdown(socket.SHUT_WR)
+
             partial_line = ""
+            # 增量解码器：避免多字节 UTF-8 字符被 recv 边界切断时 decode 抛异常
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             while True:
                 chunk = s.recv(buffer_size)
                 if not chunk:
                     break
-                    
+
                 # add new received data to the unfinished data
-                data = partial_line + chunk.decode('utf-8')
+                data = partial_line + decoder.decode(chunk)
                 lines = data.split('\n')
                 
                 # except the last line, process all complete lines

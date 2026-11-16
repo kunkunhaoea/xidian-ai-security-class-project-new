@@ -16,9 +16,19 @@ class MetaChainLogger:
         with open(self.log_path, 'a') as f:
             f.write(message + '\n')
     def _warp_args(self, args_dict: str):
-        args_dict = json.loads(args_dict)
+        # 修复（2026-11-04）：模型偶尔输出被截断或未正确转义的工具调用 JSON，
+        # 原来这里直接 json.loads，JSONDecodeError 会一路冒泡把整个任务打挂
+        # （实测第 5 次运行在 Paper Survey 第 15 轮退出，EXIT=1）。
+        # 日志只是展示层，失败时降级成原样截断显示，不影响研究流程。
+        try:
+            parsed = json.loads(args_dict)
+        except Exception:
+            text = str(args_dict).replace("\n", " ")
+            return text[:400] + ("...(truncated/unparsable)" if len(text) > 400 else "")
+        if not isinstance(parsed, dict):
+            return repr(parsed)[:400]
         args_str = ''
-        for k, v in args_dict.items():
+        for k, v in parsed.items():
             args_str += f"{repr(k)}={repr(v)}, "
         return args_str[:-2]
     def _wrap_title(self, title: str, color: str = None):

@@ -1,6 +1,9 @@
 # Standard library imports
 import copy
+import hashlib
 import json
+import os
+import time
 from collections import defaultdict
 from typing import List, Callable, Union
 from datetime import datetime
@@ -93,6 +96,16 @@ def truncate_message(message: str) -> str:
     else:
         return message
 
+# 同一个「工具 + 完全相同的参数」连续返回相同输出的次数上限，超过即短路（见 MetaChain.__init__）
+_MAX_IDENTICAL_TOOL_RESULTS = 3
+
+# 轮数预算上限（优化 P0，2026-11-10）：原 max_turns=float("inf") 无上限，开放式任务会
+# 无限自我实验（实测 47 轮空转、read_file 同参数重复 274 次烧 token）。改为按“轮”计数
+# 的有限预算（一轮＝一次 LLM 补全＋其工具执行），超限优雅收尾而非死循环。
+# 可用环境变量 MAX_AGENT_TURNS 覆盖；正常复杂任务可调高。
+DEFAULT_MAX_TURNS = int(os.getenv("MAX_AGENT_TURNS", "80"))
+
+
 class MetaChain:
     def __init__(self, log_path: Union[str, None, MetaChainLogger] = None):
         """
@@ -106,6 +119,14 @@ class MetaChain:
             self.logger = MetaChainLogger(log_path=log_path)
         if self.logger.log_path is None: self.logger.info("[Warning] Not specific log path, so log will not be saved", "...", title="Log Path", color="light_cyan3")
         else: self.logger.info("Log file is saved to", self.logger.log_path, "...", title="Log Path", color="light_cyan3")
+
+        # 反空转保护（2026-11-04）：记录每个「工具 + 参数」最近一次输出的指纹。
+        # 连续 _MAX_IDENTICAL_TOOL_RESULTS 次拿到完全相同的输出，就判定为无效重试，
+        # 之后同样的调用直接短路，不再执行、也不再往上下文里灌重复内容。
+        # 实测背景：一次运行里 read_file('/workplace/VQGAN-pytorch/vqgan.py') 被
+        # 原样重复调用 274 次，每次都返回同一句解码报错，直到 API 余额耗尽。
+        self._tool_result_fingerprint: dict = {}
+        self._blocked_tool_calls: set = set()
 
     def get_chat_completion(
         self,
@@ -205,8 +226,53 @@ class MetaChain:
                     }
                 )
                 continue
-            args = json.loads(tool_call.function.arguments)
+            try:
+                args = json.loads(tool_call.function.arguments)
+            except Exception:
+                # 修复（2026-11-04）：模型偶尔给出被截断/未转义的工具调用 JSON。
+                # 原来这里直接 json.loads，异常会终止整个研究流程；现在按上面
+                # “工具不存在”的同样方式回一条 tool 消息，让代理自己重试。
+                # 修复（2026-11-10）：此处作用域内没有 messages 变量，应写入
+                # partial_response.messages，否则触发 NameError 直接崩掉整条链路。
+                partial_response.messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": name,
+                        "content": (
+                            f"[Tool Call Error] The arguments of tool {name} were not valid JSON "
+                            f"(truncated or unescaped): {str(tool_call.function.arguments)[:300]}. "
+                            "Please re-issue the call with valid JSON."
+                        ),
+                    }
+                )
+                continue
             
+            # 反空转：这个「工具 + 参数」已经被证明连续返回相同输出，直接短路，
+            # 既不再执行工具，也不再往上下文里塞重复内容。
+            call_key = f"{name}|{tool_call.function.arguments}"
+            if call_key in self._blocked_tool_calls:
+                self.logger.info(
+                    f"[Blocked Repeated Call] {name} with identical arguments was already answered "
+                    f"identically {_MAX_IDENTICAL_TOOL_RESULTS}+ times; skipped without executing.",
+                    title="Tool Call Error", color="red",
+                )
+                partial_response.messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": name,
+                        "content": (
+                            f"[Blocked repeated call] `{name}` with these exact arguments has already "
+                            "returned the same output several times, so it was not executed again. "
+                            "Use the result you already have, or change your approach: different tool, "
+                            "different/narrower arguments, a shell command (e.g. `grep -n`, `sed -n`), "
+                            "or move on to the next step of the plan."
+                        ),
+                    }
+                )
+                continue
+
             # debug_print(
             #     debug, f"Processing tool call: {name} with arguments {args}")
             func = function_map[name]
@@ -232,13 +298,36 @@ class MetaChain:
 
 
             result: Result = self.handle_function_result(raw_result, debug)
-    
+
+            # 反空转：给这次输出打指纹。同一个「工具 + 参数」连续 _MAX_IDENTICAL_TOOL_RESULTS
+            # 次输出一模一样，就说明模型在无效重试（典型场景：读文件报解码错误后原样再读一遍），
+            # 于是把它加入黑名单，并在本次结果后面直接告诉模型别再重复。
+            content = str(result.value)
+            fingerprint = hashlib.sha1(content.encode("utf-8", "replace")).hexdigest()
+            previous = self._tool_result_fingerprint.get(call_key)
+            repeat_count = previous[1] + 1 if previous and previous[0] == fingerprint else 1
+            self._tool_result_fingerprint[call_key] = (fingerprint, repeat_count)
+            if repeat_count >= _MAX_IDENTICAL_TOOL_RESULTS:
+                self._blocked_tool_calls.add(call_key)
+                self.logger.info(
+                    f"[Repeated Tool Call] {name} returned identical output {repeat_count} times; "
+                    "further identical calls are blocked.",
+                    title="Tool Call Error", color="red",
+                )
+                content = (
+                    f"{content}\n\n[Repeated-call notice] This exact call has now returned identical "
+                    f"output {repeat_count} times in a row; repeating it again is blocked. "
+                    "Do not call it with the same arguments: use what you already have, or change "
+                    "tool/arguments (narrower path, `grep -n`/`sed -n` in the terminal, another page) "
+                    "and continue with the plan."
+                )
+
             partial_response.messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "name": name,
-                    "content": result.value,
+                    "content": content,
                 }
             )
             self.logger.pretty_print_messages(partial_response.messages[-1])
@@ -267,6 +356,17 @@ class MetaChain:
 
         return partial_response
 
+    @staticmethod
+    def _terminal_call_name(message) -> Union[str, None]:
+        """遍历本次补全的所有 tool_calls，返回终止函数名（case_resolved/case_not_resolved），
+        没有则返回 None。优化 P0（2026-11-10）：原来终止判定只看 tool_calls[0]，模型若把
+        终止调用放在第二个、或并行发出多个调用时会漏判，导致 Agent 不收尾继续空转。"""
+        for tc in (getattr(message, "tool_calls", None) or []):
+            name = tc.function.name
+            if name in ("case_resolved", "case_not_resolved"):
+                return name
+        return None
+
     def run(
         self,
         agent: Agent,
@@ -275,7 +375,7 @@ class MetaChain:
         model_override: str = None,
         stream: bool = False,
         debug: bool = True,
-        max_turns: int = float("inf"),
+        max_turns: int = DEFAULT_MAX_TURNS,
         execute_tools: bool = True,
     ) -> Response:
         if stream:
@@ -292,10 +392,12 @@ class MetaChain:
         context_variables = copy.deepcopy(context_variables)
         history = copy.deepcopy(messages)
         init_len = len(messages)
+        turns = 0  # 优化 P0：按轮计数，配合有限 max_turns 预算
 
         self.logger.info("Receiveing the task:", history[-1]['content'], title="Receive Task", color="green")
 
-        while len(history) - init_len < max_turns and active_agent:
+        while turns < max_turns and active_agent:
+            turns += 1
 
             # get completion with current history, agent
             completion = self.get_chat_completion(
@@ -308,30 +410,37 @@ class MetaChain:
             )
             message: Message = completion.choices[0].message
             message.sender = active_agent.name
-            # debug_print(debug, "Received completion:", message.model_dump_json(indent=4), log_path=log_path, title="Received Completion", color="blue")
             self.logger.pretty_print_messages(message)
             history.append(
                 json.loads(message.model_dump_json())
             )  # to avoid OpenAI types (?)
 
-            if not message.tool_calls or not execute_tools:
-                self.logger.info("Ending turn.", title="End Turn", color="red")
+            # 优化 P0：统一终止语义——无工具调用、或出现 case_resolved/case_not_resolved
+            # （遍历所有 tool_calls，而非只看第一个）即收尾。
+            terminal = self._terminal_call_name(message)
+            if not message.tool_calls or not execute_tools or terminal:
+                if terminal and message.tool_calls and execute_tools:
+                    self.logger.info(f"Ending turn with {terminal}.", title="End Turn", color="red")
+                    partial_response = self.handle_tool_calls(
+                        message.tool_calls, active_agent.functions, context_variables, debug, handle_mm_func=active_agent.handle_mm_func
+                    )
+                    history.extend(partial_response.messages)
+                    context_variables.update(partial_response.context_variables)
+                else:
+                    self.logger.info("Ending turn.", title="End Turn", color="red")
                 break
-            # if (message.tool_calls and message.tool_calls[0].function.name == "case_resolved") or not execute_tools:
-            #     debug_print(debug, "Ending turn.", log_path=log_path, title="End Turn", color="red")
-            #     break
 
             # handle function calls, updating context_variables, and switching agents
-            if message.tool_calls:
-                partial_response = self.handle_tool_calls(
-                    message.tool_calls, active_agent.functions, context_variables, debug, handle_mm_func=active_agent.handle_mm_func
-                )
-            else:
-                partial_response = Response(messages=[message])
+            partial_response = self.handle_tool_calls(
+                message.tool_calls, active_agent.functions, context_variables, debug, handle_mm_func=active_agent.handle_mm_func
+            )
             history.extend(partial_response.messages)
             context_variables.update(partial_response.context_variables)
             if partial_response.agent:
                 active_agent = partial_response.agent
+
+        if turns >= max_turns:
+            self.logger.info(f"Reached turn budget ({max_turns} turns); stopping gracefully.", title="Turn Budget", color="yellow")
 
         return Response(
             messages=history[init_len:],
@@ -491,7 +600,7 @@ class MetaChain:
         model_override: str = None,
         stream: bool = False,
         debug: bool = True,
-        max_turns: int = float("inf"),
+        max_turns: int = DEFAULT_MAX_TURNS,
         execute_tools: bool = True,
     ) -> Response:
         assert stream == False, "Async run does not support stream"
@@ -500,10 +609,16 @@ class MetaChain:
         context_variables = copy.deepcopy(context_variables)
         history = copy.deepcopy(messages)
         init_len = len(messages)
+        # 可观测性（优化 P2，2026-11-10）：统计本阶段轮数/工具调用数/被短路调用数/耗时。
+        run_start = time.time()
+        turns = 0
+        tool_call_count = 0
+        blocked_before = len(self._blocked_tool_calls)
 
         self.logger.info("Receiveing the task:", history[-1]['content'], title="Receive Task", color="green")
 
-        while len(history) - init_len < max_turns and active_agent:
+        while turns < max_turns and active_agent:
+            turns += 1
 
             # get completion with current history, agent
             try:
@@ -521,61 +636,46 @@ class MetaChain:
                 break
             message: Message = completion_response.choices[0].message
             message.sender = active_agent.name
-            # debug_print(debug, "Received completion:", message.model_dump_json(indent=4), log_path=log_path, title="Received Completion", color="blue")
             self.logger.pretty_print_messages(message)
             history.append(
                 json.loads(message.model_dump_json())
             )  # to avoid OpenAI types (?)
+            tool_call_count += len(message.tool_calls or [])
 
             if enter_agent.tool_choice != "required":
                 if (not message.tool_calls and active_agent.name == enter_agent.name) or not execute_tools:
                     self.logger.info("Ending turn.", title="End Turn", color="red")
                     break
-            else: 
-                if (message.tool_calls and message.tool_calls[0].function.name == "case_resolved") or not execute_tools:
-                    self.logger.info("Ending turn with case resolved.", title="End Turn", color="red")
+            else:
+                # 优化 P0：遍历所有 tool_calls 判定终止（原来只看 tool_calls[0]，会漏判
+                # 放在第二个/并行调用里的 case_resolved/case_not_resolved）。两个终止分支
+                # 逻辑相同，合并为一处。
+                terminal = self._terminal_call_name(message)
+                if terminal or not execute_tools:
+                    self.logger.info(f"Ending turn with {terminal or 'no tool execution'}.", title="End Turn", color="red")
+                    if not message.tool_calls:
+                        break  # 无调用可执行，直接收尾（修复原 messages[-1] 越界隐患）
                     try:
                         partial_response = self.handle_tool_calls(
                             message.tool_calls, active_agent.functions, context_variables, debug, handle_mm_func=active_agent.handle_mm_func
                         )
                         history.extend(partial_response.messages)
                         context_variables.update(partial_response.context_variables)
-                        if partial_response.messages[-1]["content"].startswith("[Tool Call Error]") is False:
+                        if partial_response.messages and partial_response.messages[-1]["content"].startswith("[Tool Call Error]") is False:
                             break
-                        else: 
-                            print("continue")
+                        else:
                             continue
                     except Exception as e:
                         self.logger.info(f"Error: {e}", title="Error", color="red")
                         history.append({"role": "error", "content": f"Error: {e}"})
                         break
-                elif (message.tool_calls and message.tool_calls[0].function.name == "case_not_resolved") or not execute_tools:
-                    self.logger.info("Ending turn with case not resolved.", title="End Turn", color="red")
-                    try:
-                        partial_response = self.handle_tool_calls(
-                            message.tool_calls, active_agent.functions, context_variables, debug, handle_mm_func=active_agent.handle_mm_func
-                        )
-                        history.extend(partial_response.messages)
-                        context_variables.update(partial_response.context_variables)
-                        if partial_response.messages[-1]["content"].startswith("[Tool Call Error]") is False:
-                            break
-                        else: 
-                            print("continue")
-                            continue
-                    except Exception as e:
-                        self.logger.info(f"Error: {e}", title="Error", color="red")
-                        history.append({"role": "error", "content": f"Error: {e}"})
-                        break
-            # if (message.tool_calls and message.tool_calls[0].function.name == "case_resolved") or not execute_tools:
-            #     debug_print(debug, "Ending turn.", log_path=log_path, title="End Turn", color="red")
-            #     break
 
             # handle function calls, updating context_variables, and switching agents
             if message.tool_calls:
                 try:
                     partial_response = self.handle_tool_calls(
-                    message.tool_calls, active_agent.functions, context_variables, debug, handle_mm_func=active_agent.handle_mm_func
-                )
+                        message.tool_calls, active_agent.functions, context_variables, debug, handle_mm_func=active_agent.handle_mm_func
+                    )
                 except Exception as e:
                     self.logger.info(f"Error: {e}", title="Error", color="red")
                     history.append({"role": "error", "content": f"Error: {e}"})
@@ -586,6 +686,28 @@ class MetaChain:
             context_variables.update(partial_response.context_variables)
             if partial_response.agent:
                 active_agent = partial_response.agent
+
+        elapsed = time.time() - run_start
+        hit_budget = turns >= max_turns
+        if hit_budget:
+            self.logger.info(
+                f"Reached turn budget ({max_turns} turns); stopping gracefully. "
+                "Raise MAX_AGENT_TURNS if the task legitimately needs more.",
+                title="Turn Budget", color="yellow",
+            )
+        self.last_run_stats = {
+            "agent": enter_agent.name,
+            "turns": turns,
+            "tool_calls": tool_call_count,
+            "blocked_calls": len(self._blocked_tool_calls) - blocked_before,
+            "elapsed_sec": round(elapsed, 1),
+            "hit_budget": hit_budget,
+        }
+        self.logger.info(
+            f"Run summary: agent={enter_agent.name} turns={turns} tool_calls={tool_call_count} "
+            f"blocked={self.last_run_stats['blocked_calls']} elapsed={elapsed:.1f}s",
+            title="Run Summary", color="cyan",
+        )
 
         return Response(
             messages=history[init_len:],
