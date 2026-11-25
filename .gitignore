@@ -14,6 +14,8 @@ credentials.json
 # Personal research materials and generated experiment artifacts
 /shared/*
 !/shared/README.md
+# DeepTutor runtime data when launched from the repository root
+/data/
 # Dependencies and caches
 .venv/
 venv/
